@@ -51,9 +51,18 @@ if wait_for '^SETTINGS ' 20; then
   else
     ok "settings-card-width" 1 "w=${W:-none}"
   fi
+  # A row wider than the card escapes the panel and gets clipped by the window,
+  # which is exactly how the shortcut picker broke when it was a button row.
+  OV=$(echo "$LAST_SET" | sed -n 's/.*"overflow":\([0-9]*\).*/\1/p')
+  if [ "${OV:-1}" = "0" ]; then
+    ok "settings-no-overflow" 0 "all rows inside the card"
+  else
+    ok "settings-no-overflow" 1 "rows=${OV:-unknown} past the card edge"
+  fi
 else
   ok "settings-panel-visible" 1 "no SETTINGS line"
   ok "settings-card-width" 1 "no SETTINGS line"
+  ok "settings-no-overflow" 1 "no SETTINGS line"
 fi
 
 say "settings.close"

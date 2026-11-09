@@ -193,6 +193,28 @@ function iconLuminance (src) {
   return null
 }
 
+/** Mirrors SHORTCUT_CHOICES in main.rs. Value is the Tauri accelerator string;
+ *  label is what the picker shows. Keep both lists in step. */
+const SHORTCUT_CHOICES = [
+  ['Alt+Space', '⌥ Space'],
+  ['Ctrl+Alt+Space', 'Ctrl+Alt+Space'],
+  ['Alt+Shift+Space', '⌥⇧ Space'],
+  ['Ctrl+Shift+Space', 'Ctrl+Shift+Space'],
+  ['Super+Shift+A', '⌘⇧ A'],
+]
+
+/** Turns the accelerator into the glyphs the platform actually shows. */
+function prettyShortcut (accel) {
+  if (!accel) return ''
+  const mac = navigator.platform.toLowerCase().includes('mac')
+  if (mac) {
+    return accel
+      .replace('Alt', '⌥').replace('Shift', '⇧').replace('Super', '⌘')
+      .replace('Ctrl', '⌃').replaceAll('+', ' ')
+  }
+  return accel.replaceAll('+', ' + ')
+}
+
 function Mark ({ tool, broken, onBreak }) {
   const [, bump] = useState(0)
   useEffect(() => {
@@ -250,6 +272,7 @@ export default function App () {
     rust_url: '',
     autostart: false,
     shortcut_ok: true,
+    shortcut: 'Alt+Space',
     rail_width: 208,
     always_on_top: false,
     zoom: 0.8,
@@ -266,6 +289,9 @@ export default function App () {
     } catch (_) {}
   }, [state.theme])
 
+  // Last rebinding failure, so the panel can name the keys that were refused
+  // instead of only showing that something went wrong.
+  const [shortcutError, setShortcutError] = useState('')
   const [liveUrl, setLiveUrl] = useState('')
   const [broken, setBroken] = useState(() => new Set())
   const [menu, setMenu] = useState(null)
@@ -574,6 +600,13 @@ export default function App () {
         visible: !view.hidden && r.width > 0,
         rect: { w: Math.round(r.width), h: Math.round(r.height) },
         viewport: { w: window.innerWidth, h: window.innerHeight },
+        // Anything wider than the card is clipped by the panel's own overflow,
+        // which is how an over-long row used to escape the window edge.
+        overflow: (() => {
+          const rows = Array.from(document.querySelectorAll('#settings-view .row'))
+          const cardRight = card.getBoundingClientRect().right
+          return rows.filter((n) => n.getBoundingClientRect().right > cardRight + 1).length
+        })(),
         autostart: Boolean(state.autostart),
         settingsHidden: view.hidden,
       }),
@@ -902,10 +935,41 @@ export default function App () {
               <button title="放大" onClick={() => applyZoom(0.05)}><Icon id="plus" /></button>
             </span>
           </div>
+          <div className="row">
+            <span>召唤快捷键</span>
+            {/* A select, not a row of buttons: five accelerators laid out
+                inline overflow the settings card and push the panel past the
+                window edge. The list also grows without limit if more are
+                added, while a dropdown stays one line. */}
+            <select
+              className="select"
+              aria-label="召唤快捷键"
+              value={state.shortcut}
+              onChange={async (e) => {
+                const value = e.target.value
+                const before = state.shortcut
+                try {
+                  const actual = await invoke('set_shortcut', { shortcut: value })
+                  setState((p) => ({ ...p, shortcut: actual, shortcut_ok: true }))
+                  setShortcutError('')
+                } catch (err) {
+                  // Rebinding is refused when another app already owns the
+                  // keys, and the backend restores the old binding, so the panel
+                  // only has to revert the control and explain why.
+                  setState((p) => ({ ...p, shortcut: before, shortcut_ok: false }))
+                  setShortcutError(String(err))
+                }
+              }}
+            >
+              {SHORTCUT_CHOICES.map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </div>
           <div className={cl('hint', state.shortcut_ok === false && 'warn')}>
             {state.shortcut_ok === false
-              ? '⌥Space 被其他应用占用，注册失败。请改用托盘菜单。'
-              : '⌥Space 显隐窗口（不抢焦点）· ⌘N 新会话 · ⌘R 刷新 · ⌘Q 退出'}
+              ? `快捷键注册失败：${shortcutError || state.shortcut}被占用，已恢复原设置。可在托盘菜单召唤。`
+              : `${prettyShortcut(state.shortcut)} 显隐窗口（不抢焦点）· ⌘N 新会话 · ⌘R 刷新 · ⌘Q 退出`}
           </div>
           <div className="actions">
             <button className="primary" onClick={closeSettings}>完成</button>

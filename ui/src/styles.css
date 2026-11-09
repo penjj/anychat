@@ -18,9 +18,10 @@
   --traffic-h: 40px;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, sans-serif;
   /* The wordmark's own stack. Kept apart from --font so the launch animation and
-     the title bar can share one family while body copy stays on the UI stack.
-     Must match SplashAnimation.jsx, which rasterises the same family. */
-  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", system-ui, sans-serif;
+     the title bar share one family while body copy stays on the UI stack.
+     SplashAnimation.jsx reads this same variable for its offscreen raster, so
+     the motes always form the letters of whatever family is set here. */
+  --font-display: "Poppins", -apple-system, BlinkMacSystemFont, "PingFang SC", system-ui, sans-serif;
 }
 
 /* Light theme.
@@ -69,6 +70,32 @@
     --accent: #7c8cff;
     --mark-plate: #f2f2f5;
   }
+}
+
+/* Poppins, SIL OFL 1.1 -- see ui/fonts/OFL.txt.
+   Self-hosted rather than linked from a CDN: the shell should not depend on a
+   third party to render its own wordmark, and a network round trip would show
+   the fallback face first on every launch. */
+@font-face {
+  font-family: "Poppins";
+  src: url("../fonts/poppins-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "Poppins";
+  src: url("../fonts/poppins-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "Poppins";
+  src: url("../fonts/poppins-800.woff2") format("woff2");
+  font-weight: 800;
+  font-style: normal;
+  font-display: block;
 }
 
 * { box-sizing: border-box; }
@@ -428,6 +455,26 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   font-size: 13px;
 }
 .zoom-controls button:hover { background: var(--hover); }
+
+/* Native select styled to match the panel. Used where the option list would be
+   too wide to lay out inline -- five accelerators, for instance, overflowed the
+   card and pushed the panel past the window edge. */
+.select {
+  max-width: 200px;
+  min-width: 150px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--elev);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  /* The platform arrow follows the system appearance; keep the menu readable
+     on both themes rather than inheriting a light-only default. */
+  color-scheme: light dark;
+}
+.select:hover { background: var(--hover); }
+.select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* Segmented control for the three theme choices. Three literal labels beat a
    cycling button: "auto" is not a state you can infer from the current

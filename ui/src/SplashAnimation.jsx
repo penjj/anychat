@@ -201,9 +201,17 @@ export default function SplashAnimation () {
         bucketS[i].length = 0
       }
     }
-    build()
-
+    // Canvas ignores font-display, so an early raster would carve the fallback's
+    // letterforms and the motes would assemble into the wrong word for the whole
+    // run. Wait for the real face, but never block the animation on it: a font
+    // that fails to load must still leave a launch that completes.
     const started = performance.now()
+    const ready = Promise.race([
+      document.fonts.load(`800 64px ${getComputedStyle(document.documentElement)
+        .getPropertyValue('--font-display').trim()}`).catch(() => {}),
+      new Promise((r) => setTimeout(r, 400)),
+    ])
+    ready.then(build)
 
     const frame = (now) => {
       if (stats) {

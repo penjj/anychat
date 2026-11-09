@@ -90,11 +90,39 @@ struct Layout {
     /// fail to deserialize and reset the whole layout.
     #[serde(default = "default_theme")]
     theme: String,
+    /// Summon accelerator in Tauri's string form, e.g. "Alt+Space". Empty means
+    /// "never set", which is what lets the platform default below take over.
+    #[serde(default)]
+    shortcut: String,
 }
 
 fn default_theme() -> String {
     "auto".to_string()
 }
+
+/// The default summon accelerator per platform.
+///
+/// macOS keeps ⌥Space: it is the system-wide spotlight-free gap, and ⌘Space is
+/// already Spotlight. Windows uses Ctrl+Alt+Space -- Win+Space switches the
+/// keyboard layout, and a bare Alt+Space opens the window's system menu, so both
+/// obvious choices are taken by the OS.
+fn default_shortcut() -> String {
+    if cfg!(target_os = "macos") {
+        "Alt+Space".to_string()
+    } else {
+        "Ctrl+Alt+Space".to_string()
+    }
+}
+
+/// Every accelerator worth offering in the UI, in the order the picker shows.
+/// Kept as a constant so the menu, the settings panel and the docs cannot drift.
+const SHORTCUT_CHOICES: &[(&str, &str)] = &[
+    ("Alt+Space", "⌥ Space / Alt+Space"),
+    ("Ctrl+Alt+Space", "Ctrl + Alt + Space"),
+    ("Alt+Shift+Space", "⌥ ⇧ Space / Alt+Shift+Space"),
+    ("Ctrl+Shift+Space", "Ctrl + Shift + Space"),
+    ("Super+Shift+A", "⌘ ⇧ A / Win+Shift+A"),
+];
 
 fn default_zoom() -> f64 {
     0.8
@@ -112,6 +140,7 @@ impl Default for Layout {
             win_h: 0.0,
             always_on_top: false,
             theme: default_theme(),
+            shortcut: String::new(),
         }
     }
 }
@@ -567,6 +596,9 @@ struct StateDto {
     new_chat: String,
     autostart: bool,
     shortcut_ok: bool,
+    /// The accelerator in force, so the settings panel shows the real binding
+    /// rather than a guess, and offers the platform default when unset.
+    shortcut: String,
     visible: bool,
     rail_width: f64,
     always_on_top: bool,
@@ -975,7 +1007,8 @@ fn state_dto(app: &tauri::AppHandle) -> StateDto {
         active_name: tool.map(|t| t.name.to_string()).unwrap_or_default(),
         new_chat: tool.map(|t| t.new_chat.to_string()).unwrap_or_default(),
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
-        shortcut_ok: app.global_shortcut().is_registered("Alt+Space"),
+        shortcut_ok: app.global_shortcut().is_registered(active_shortcut(app).as_str()),
+        shortcut: active_shortcut(app),
         visible: app
             .get_window("main")
             .and_then(|w| w.is_visible().ok())
@@ -1028,6 +1061,35 @@ fn relayout_all(app: &tauri::AppHandle) {
         }
     }
     let _ = app.emit_to(RAIL_LABEL, "rail-layout", load_layout(app));
+}
+
+/// Registers the summon accelerator, replacing whatever was bound before.
+///
+/// `register` alone only reserves the key -- it installs no callback, so the
+/// shortcut looked bound while doing nothing. `on_shortcut` does both.
+fn bind_shortcut(app: &tauri::AppHandle, accel: &str) -> Result<(), String> {
+    let gs = app.global_shortcut();
+    // Rebinding must not leave the previous accelerator live, or the old keys
+    // would keep summoning the window alongside the new ones.
+    let _ = gs.unregister_all();
+    gs.on_shortcut(accel.parse::<Shortcut>().map_err(|e| e.to_string())?, |app, _s, event| {
+        // Fire once per press; the release event would toggle straight back.
+        if event.state() != ShortcutState::Pressed {
+            return;
+        }
+        toggle_window(app);
+    })
+    .map_err(|e| format!("{accel} 已被其他应用占用 ({e})"))
+}
+
+/// The accelerator currently in force: the saved value unless it is unset.
+fn active_shortcut(app: &tauri::AppHandle) -> String {
+    let saved = load_layout(app).shortcut;
+    if saved.is_empty() {
+        default_shortcut()
+    } else {
+        saved
+    }
 }
 
 /// Applies the saved zoom to a webview (or all of them when id is None).
@@ -1446,6 +1508,29 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
 
 /// Sets the colour theme. `auto` follows the OS, which CSS resolves through
 /// prefers-color-scheme, so no listener is needed here.
+/// Changes the summon accelerator.
+///
+/// Rebinding is only committed once the new keys are actually held: saving
+/// first would leave the user with no working shortcut if the pick was already
+/// taken by another app.
+#[tauri::command]
+fn set_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<String, String> {
+    let wanted = shortcut.trim().to_string();
+    let restore = active_shortcut(&app);
+
+    if let Err(why) = bind_shortcut(&app, &wanted) {
+        // Put the old binding back so the window stays reachable.
+        let _ = bind_shortcut(&app, &restore);
+        return Err(why);
+    }
+
+    let mut layout = load_layout(&app);
+    layout.shortcut = wanted.clone();
+    save_layout(&app, &layout);
+    emit_state(&app);
+    Ok(wanted)
+}
+
 #[tauri::command]
 fn set_theme(app: tauri::AppHandle, theme: String) -> Result<String, String> {
     let theme = match theme.as_str() {
@@ -1809,9 +1894,33 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
         check("summon-not-on-top", !on_top, format!("alwaysOnTop={on_top}"));
     }
 
-    // global shortcut
-    let shortcut_ok = app.global_shortcut().is_registered("Alt+Space");
-    check("shortcut-alt-space", shortcut_ok, String::new());
+    // global shortcut: the effective binding, whatever the platform default is
+    let accel = active_shortcut(app);
+    let shortcut_ok = app.global_shortcut().is_registered(accel.as_str());
+    check("shortcut-registered", shortcut_ok, accel.clone());
+
+    // Rebinding is the part that can silently break: the store must end up with
+    // the new accelerator *and* the OS must actually own it afterwards, so the
+    // check looks at both.
+    let alternate = SHORTCUT_CHOICES
+        .iter()
+        .map(|(v, _)| *v)
+        .find(|v| *v != accel.as_str())
+        .unwrap_or("Alt+Space");
+    match set_shortcut(app.clone(), alternate.to_string()) {
+        Ok(applied) => {
+            let saved = load_layout(app).shortcut;
+            let live = app.global_shortcut().is_registered(applied.as_str());
+            check(
+                "shortcut-rebind",
+                applied == alternate && saved == alternate && live,
+                format!("want={alternate} applied={applied} saved={saved} live={live}"),
+            );
+        }
+        Err(why) => check("shortcut-rebind", false, why),
+    }
+    // Leave the original in place so later checks see the normal binding.
+    set_shortcut(app.clone(), accel.clone()).ok();
 
     // every partition dir can be created and is distinct
     let mut dirs = Vec::new();
@@ -2138,6 +2247,7 @@ fn main() {
             close_settings,
             set_autostart,
             set_theme,
+            set_shortcut,
             open_external,
             current_url
         ])
@@ -2225,22 +2335,8 @@ fn main() {
             build_app_menu(&handle)?;
             build_tray(&handle)?;
 
-            // `register` alone only reserves the accelerator -- it installs no
-            // callback, so the key looked bound while doing nothing at all.
-            // `on_shortcut` both registers and wires the handler.
-            let shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
-            let registered = handle
-                .global_shortcut()
-                .on_shortcut(shortcut, |app, _shortcut, event| {
-                    // Fire once per press; the release event would toggle back.
-                    if event.state() != ShortcutState::Pressed {
-                        return;
-                    }
-                    toggle_window(app);
-                })
-                .is_ok();
-            if !registered {
-                eprintln!("anychat: ⌥Space is taken by another app; use the tray menu");
+            if let Err(why) = bind_shortcut(&handle, &active_shortcut(&handle)) {
+                eprintln!("anychat: {why}");
             }
 
             // First tool is created eagerly so the window has content the moment
