@@ -73,9 +73,13 @@ jobs:
               if ($_ -match '^([^=]+)=(.*)$') { "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
             }
 
+      # Git Bash ships `link.exe` (coreutils link), and on a windows runner it
+      # shadows the MSVC linker, so a bash shell breaks the arm64 leg with
+      # "extra operand". pwsh keeps the real linker first on PATH; the arm64
+      # MSVC environment set up above is already in GITHUB_ENV either way.
       - name: Build bundle
         run: npm run tauri build -- --target ${{ matrix.target }}
-        shell: bash
+        shell: pwsh
 
       # Tauri names its outputs per format, so collect whatever this platform
       # produced instead of guessing the extension.
