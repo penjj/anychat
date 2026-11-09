@@ -483,8 +483,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   background: transparent;
   transition: background 120ms ease;
 }
-#resizer:hover::after { background: color-mix(in srgb, var(--fg) 22%, transparent); }
-#app.resizing #resizer { background: color-mix(in srgb, var(--fg) 18%, transparent); }
+/* Opacity rather than color-mix: the bundle still declares macOS 11 support,
+   and color-mix only arrived in Safari 16.2. Both forms tint the same colour,
+   but this one degrades to "no tint" instead of silently vanishing. */
+#resizer:hover::after { background: var(--fg); opacity: 0.22; }
+#app.resizing #resizer { background: var(--fg); opacity: 0.18; }
 
 .head-btn.active { background: var(--hover); color: var(--accent); }
 

@@ -332,6 +332,19 @@ export default function App () {
         railCardWidth: Math.round(rail.getBoundingClientRect().width),
         // Proves the label sits centred rather than flush left: compare the gap
         // on each side of the button's content box.
+        // Proves the wordmark is centred on the bar rather than nudged by the
+        // controls sharing it.
+        winTitle: (() => {
+          const t = document.querySelector('.win-title')
+          const h = document.querySelector('.rail-head')
+          if (!t || !h) return null
+          const tr = t.getBoundingClientRect()
+          const hr = h.getBoundingClientRect()
+          return {
+            off: Math.round((tr.left + tr.right) / 2 - (hr.left + hr.right) / 2),
+            font: getComputedStyle(t).fontFamily.slice(0, 24),
+          }
+        })(),
         footBtn: (() => {
           const btn = document.getElementById('btn-new')
           if (!btn) return null
