@@ -168,6 +168,20 @@ RESULT ok
 
 `ANYCHAT_PROBE=1` 的探针日志会打印 `reclaimed N`，`resident` 命令可查当前常驻列表。
 
+## 主题
+
+三档：深色、浅色、跟随系统（默认）。设置面板里切换，存到 `layout.json` 的 `theme` 字段。
+
+`auto` 由 CSS 的 `prefers-color-scheme` 解析，不靠 JS 监听系统事件——那样会有一帧延迟。首帧防闪靠 `index.html` 里的内联脚本：它同步读 localStorage 并立刻设置 `data-theme`，而 Rust 侧的真实值在后续 `state` 里覆盖它。
+
+侧栏图标按需加底盘：站点 favicon 是为白底设计的，GitHub、OpenAI 这类近黑图标在深色侧栏上会消失。前端在 16×16 canvas 上测平均亮度，只有过暗或过亮时才加反差底盘，彩色图标不受影响。
+
+## 启动动画字体
+
+`--font-display` 是标题栏和启动动画共用的字族，`SplashAnimation.jsx` 里 canvas 的字体必须与它保持一致，否则点的形状和布局预留的空间对不上。
+
+`font-preview.html` 是选字体用的预览页，用同样的 mote 点阵采样渲染 16 款候选。直接用浏览器打开即可，不参与构建。
+
 ## 窗口行为
 
 - **失焦自动隐藏**：窗口失去焦点 400ms 后隐藏，不用按 ⌘W。三种情况抑制：右键菜单打开、设置面板打开、有登录弹窗在屏幕上。

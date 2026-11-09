@@ -45,9 +45,14 @@ function measureWord (width, height) {
   if (!c) return { points: [], step: 1, size: 0 }
 
   // Keep in sync with the splash stylesheet's font-size: the form the motes
-  // build has to match the space the layout expects.
+  // build has to match the space the layout expects. The family is read from
+  // --font-display so changing it in one place changes the wordmark too; a
+  // hard-coded stack here silently ignored that variable.
   const size = Math.min(width / (TEXT.length * 0.62), height * 0.20)
-  c.font = `800 ${size}px -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", system-ui, sans-serif`
+  const display = getComputedStyle(document.documentElement)
+    .getPropertyValue('--font-display')
+    .trim() || '-apple-system, BlinkMacSystemFont, system-ui, sans-serif'
+  c.font = `800 ${size}px ${display}`
   c.textAlign = 'center'
   c.textBaseline = 'middle'
   c.fillStyle = '#fff'
