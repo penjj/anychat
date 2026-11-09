@@ -1726,6 +1726,20 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
         results.push((name.to_string(), ok, detail));
     };
 
+    // Theme round-trip: the command must persist the choice and push it onto
+    // the page. A UI-only switch would look right and reset on every launch,
+    // which is the failure this checks for.
+    for want in ["light", "dark", "auto"] {
+        let got = set_theme(app.clone(), want.to_string()).unwrap_or_default();
+        let saved = load_layout(app).theme;
+        check(
+            "theme-round-trip",
+            got == want && saved == want,
+            format!("want={want} got={got} saved={saved}"),
+        );
+    }
+    set_theme(app.clone(), "auto".to_string()).ok();
+
     // tool inventory
     check("tool-inventory", !TOOLS.is_empty(), format!("{} tools", TOOLS.len()));
     let groups: Vec<&str> = TOOLS.iter().map(|t| t.group).collect();
@@ -1866,20 +1880,6 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
         after.contains(expected.trim_end_matches('/')) || after == expected,
         format!("before={before} after={after} expected={expected}"),
     );
-
-    // Theme round-trip: the command must persist the choice and push it onto
-    // the page. A UI-only switch would look right and reset on every launch,
-    // which is the failure this checks for.
-    for want in ["light", "dark", "auto"] {
-        let got = set_theme(app.clone(), want.to_string()).unwrap_or_default();
-        let saved = load_layout(app).theme;
-        check(
-            "theme-round-trip",
-            got == want && saved == want,
-            format!("want={want} got={got} saved={saved}"),
-        );
-    }
-    set_theme(app.clone(), "auto".to_string()).ok();
 
     // Settings is reachable, covers the window, and reports its own DOM.
     // Settings is a view inside the rail page driven by a command reply, not by
