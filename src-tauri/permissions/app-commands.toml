@@ -1,0 +1,124 @@
+[[permission]]
+identifier = "list-tools"
+description = "Allows the rail webview to call the application command list_tools."
+commands.allow = ["list_tools"]
+
+[[permission]]
+identifier = "rail-ready"
+description = "Allows the rail webview to call the application command rail_ready."
+commands.allow = ["rail_ready"]
+
+[[permission]]
+identifier = "settings-ready"
+description = "Allows the rail webview to call the application command settings_ready."
+commands.allow = ["settings_ready"]
+
+[[permission]]
+identifier = "state"
+description = "Allows the rail webview to call the application command state."
+commands.allow = ["state"]
+
+[[permission]]
+identifier = "layout"
+description = "Allows the rail webview to call the application command layout."
+commands.allow = ["layout"]
+
+[[permission]]
+identifier = "select-tool"
+description = "Allows the rail webview to call the application command select_tool."
+commands.allow = ["select_tool"]
+
+[[permission]]
+identifier = "new-chat"
+description = "Allows the rail webview to call the application command new_chat."
+commands.allow = ["new_chat"]
+
+[[permission]]
+identifier = "nav"
+description = "Allows the rail webview to call the application command nav."
+commands.allow = ["nav"]
+
+[[permission]]
+identifier = "toggle"
+description = "Allows the rail webview to call the application command toggle."
+commands.allow = ["toggle"]
+
+[[permission]]
+identifier = "set-rail-width"
+description = "Allows the rail webview to call the application command set_rail_width."
+commands.allow = ["set_rail_width"]
+
+[[permission]]
+identifier = "set-zoom"
+description = "Allows the rail webview to call the application command set_zoom."
+commands.allow = ["set_zoom"]
+
+[[permission]]
+identifier = "open-settings"
+description = "Allows the rail webview to call the application command open_settings."
+commands.allow = ["open_settings"]
+
+[[permission]]
+identifier = "close-settings"
+description = "Allows the rail webview to call the application command close_settings."
+commands.allow = ["close_settings"]
+
+[[permission]]
+identifier = "set-autostart"
+description = "Allows the rail webview to call the application command set_autostart."
+commands.allow = ["set_autostart"]
+
+[[permission]]
+identifier = "open-external"
+description = "Allows the rail webview to call the application command open_external."
+commands.allow = ["open_external"]
+
+[[permission]]
+identifier = "current-url"
+description = "Allows the rail webview to call the application command current_url."
+commands.allow = ["current_url"]
+
+[[permission]]
+identifier = "splash-done"
+description = "Allows the launch animation window to hand over to the main window."
+commands.allow = ["splash_done"]
+
+[[permission]]
+identifier = "splash-stats"
+description = "Allows the launch animation window to report how many glyph points it sampled, so a sparse word shows up in the boot log."
+commands.allow = ["splash_stats"]
+
+[[permission]]
+identifier = "reclaim-tool"
+description = "Allows the rail to destroy one idle tool webview to give its memory back."
+commands.allow = ["reclaim_tool"]
+
+[[permission]]
+identifier = "reclaim-all-idle"
+description = "Allows the rail to destroy every idle tool webview."
+commands.allow = ["reclaim_all_idle"]
+
+[[permission]]
+identifier = "resident-tools"
+description = "Allows the rail to ask which tool webviews are currently resident."
+commands.allow = ["resident_tools"]
+
+[[permission]]
+identifier = "menu-open"
+description = "Allows the rail to hide the content webview while a context menu is showing over it."
+commands.allow = ["menu_open"]
+
+[[permission]]
+identifier = "menu-close"
+description = "Allows the rail to restore the content webview after a context menu closes."
+commands.allow = ["menu_close"]
+
+[[permission]]
+identifier = "set-pin"
+description = "Allows the rail to toggle pin-to-top for the main window."
+commands.allow = ["set_pin"]
+
+[[permission]]
+identifier = "resize-window"
+description = "Allows the rail to drive an interactive window resize from the window corners and edges."
+commands.allow = ["resize_window"]

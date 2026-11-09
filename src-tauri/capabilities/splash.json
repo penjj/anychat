@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "splash",
+  "description": "The launch animation window may do exactly one thing: tell the main process it is finished. It has no access to app state, tools or window controls.",
+  "windows": [
+    "splash"
+  ],
+  "webviews": [
+    "splash"
+  ],
+  "permissions": [
+    "splash-done"
+  ]
+}

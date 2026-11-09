@@ -1,0 +1,49 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The rail webview is a child webview, so it needs to be named here too. Application commands must be listed explicitly: since Tauri v2 they are not covered by core:default, and a missing entry fails at invoke time with 'Command not found'.",
+  "windows": [
+    "main",
+    "settings",
+    "splash"
+  ],
+  "webviews": [
+    "rail"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-is-visible",
+    "core:window:allow-start-dragging",
+    "opener:default",
+    "autostart:default",
+    "global-shortcut:default",
+    "list-tools",
+    "rail-ready",
+    "settings-ready",
+    "state",
+    "layout",
+    "select-tool",
+    "new-chat",
+    "nav",
+    "toggle",
+    "set-rail-width",
+    "open-settings",
+    "close-settings",
+    "set-autostart",
+    "open-external",
+    "current-url",
+    "set-zoom",
+    "splash-done",
+    "splash-stats",
+    "reclaim-tool",
+    "reclaim-all-idle",
+    "resident-tools",
+    "menu-open",
+    "menu-close",
+    "set-pin",
+    "resize-window"
+  ]
+}

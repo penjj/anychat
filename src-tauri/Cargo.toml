@@ -1,0 +1,34 @@
+[package]
+name = "anychat"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-model AI chat workspace on Tauri + system WebView"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable", "tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[target."cfg(target_os = \"macos\")".dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSResponder", "NSApplication", "NSView", "NSColor"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView"] }
+objc2-foundation = { version = "0.3", features = ["NSThread"] }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+
