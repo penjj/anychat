@@ -700,6 +700,18 @@ fn shared_profile_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// A private user-data directory for the rail, beside the tools' store.
+///
+/// Distinct from `profile/` on purpose: two webviews cannot share one user-data
+/// directory through separate environments, and the rail needs nothing that is
+/// stored there.
+#[cfg(not(target_os = "macos"))]
+fn rail_profile_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = data_root(app)?.join("rail-profile");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 /// A private user-data directory for the splash window on Windows.
 ///
 /// The rail keeps Tauri's default directory and the splash gets this one, so
@@ -3350,8 +3362,18 @@ fn main() {
                 }
             }
 
-            let rail = WebviewBuilder::new(RAIL_LABEL, WebviewUrl::App("index.html".into()))
+            let mut rail = WebviewBuilder::new(RAIL_LABEL, WebviewUrl::App("index.html".into()))
                 .initialization_script("window.__ANYCHAT__ = { hidden: true };");
+            // Its own directory, not Tauri's default. The default is the app
+            // data directory, which is not governed by ANYCHAT_DATA_DIR, so two
+            // launches in a row -- the gate does exactly that -- open the same
+            // one and the second fails with ERROR_BUSY while the first is still
+            // being torn down. Keeping it under `data_root` makes every webview
+            // in the process follow the same isolation rule.
+            #[cfg(not(target_os = "macos"))]
+            if let Some(dir) = rail_profile_dir(app.handle()) {
+                rail = rail.data_directory(dir);
+            }
             window.add_child(
                 rail,
                 LogicalPosition::new(0.0, 0.0),
