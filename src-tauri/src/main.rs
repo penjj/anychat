@@ -1046,6 +1046,7 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
         // existed, nothing printed after it, and the window stayed white.
         let late = webview.clone();
         let report_label = label.clone();
+        let owned_id = id.to_string();
         std::thread::spawn(move || {
             // Long enough for creation to finish and the browser to start.
             std::thread::sleep(std::time::Duration::from_millis(600));
@@ -1059,7 +1060,7 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
             if initial == "about:blank" {
                 // The controller can exist before the browser behind it, and a
                 // navigation issued in that window is dropped without an error.
-                if let Ok(target) = tools::get(id).map(|t| t.url).unwrap_or_default().parse() {
+                if let Ok(target) = tools::get(&owned_id).map(|t| t.url).unwrap_or_default().parse() {
                     match late.navigate(target) {
                         Ok(()) => println!("TOOLURL {report_label} reissued"),
                         Err(e) => println!("TOOLURL {report_label} reissue-err {e}"),
