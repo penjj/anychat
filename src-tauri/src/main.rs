@@ -996,16 +996,34 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
         .ok()?;
     #[cfg(windows)]
     {
+        // Recorded before the reporting below, and on this thread: `with_webview`
+        // runs its closure inline when it is already on the main thread, so
+        // asking for the environment from a freshly created child is safe but
+        // must not be interleaved with reads that assume the child is settled.
         remember_environment(&webview);
-        // Diagnostic: a content view that reports about:blank here never
-        // received the navigation it was built with, and every later read
-        // agrees. Printed once per creation, so a white window has a line that
-        // says which side of the handoff it came from.
+        // A content view that reports about:blank here never received the
+        // navigation it was built with, and every later read agrees. Printed
+        // once per creation, so a white window has a line that says which side
+        // of the handoff it came from.
         let probe = webview.clone();
-        println!(
-            "TOOLURL {label} initial={:?}",
-            probe.url().map(|u| u.to_string()).unwrap_or_else(|e| format!("err:{e}"))
-        );
+        let initial = probe
+            .url()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|e| format!("err:{e}"));
+        println!("TOOLURL {label} initial={initial}");
+        // If the child came up without the navigation it was built with, issue
+        // it explicitly. WebView2 accepts a controller before the underlying
+        // browser has finished starting, and a `Navigate` issued in that window
+        // is dropped without an error, which is why this is not reported as a
+        // failure: the view is real, it simply has nothing in it.
+        if initial == "about:blank" {
+            if let Ok(target) = tools::get(id).map(|t| t.url).unwrap_or_default().parse() {
+                match probe.navigate(target) {
+                    Ok(()) => println!("TOOLURL {label} reissued"),
+                    Err(e) => println!("TOOLURL {label} reissue-err {e}"),
+                }
+            }
+        }
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(3000));
             println!(
