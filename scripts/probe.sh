@@ -224,9 +224,13 @@ say "resize $SMALL_W 700"
 # Wait for the slot width to actually change, not merely for more log lines:
 # the rail reports repeatedly while settling, so a line count is satisfied by
 # an unchanged measurement and the check then compares 512 with 512.
+# Gate on the window width, not the slot width. The report is written when the
+# rail lays out, and `tail -1` returns the last one written, which right after a
+# resize is still the pre-resize report being rewritten -- so waiting for the
+# slot to differ can be satisfied by the old number arriving again.
 for _ in $(seq 1 80); do
-  W=$(rail_field "$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')" slot.w)
-  if [ -n "${W:-}" ] && [ "$W" != "$BEFORE_SLOT" ]; then break; fi
+  WIN_W=$(rail_field "$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')" win.w)
+  if [ -n "${WIN_W:-}" ] && [ "$WIN_W" != "$CUR_W" ]; then break; fi
   sleep 0.25
 done
 AFTER=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')

@@ -802,12 +802,14 @@ mod win_env {
         if addr == 0 {
             return None;
         }
-        // SAFETY: only `publish` writes this, with a pointer taken from a live
-        // webview's environment, and that environment outlives every controller
-        // including the one about to be created. `from_raw` takes its own
-        // reference, so the caller's handle is independent of the original
-        // webview's lifetime.
-        unsafe { Some(ICoreWebView2Environment::from_raw(addr as *mut _)) }
+        // Borrowed, then owned: `to_owned` is what raises the reference count.
+        // `from_raw` would take ownership of a reference nobody created, so
+        // each call would consume the one the previous handle owned. The first
+        // webview to join would work and every later one would wrap freed
+        // memory -- creation reports success and the page never navigates,
+        // which reads as a white screen rather than as a crash.
+        let raw = addr as *mut std::ffi::c_void;
+        unsafe { ICoreWebView2Environment::from_raw_borrowed(&raw).map(|e| e.to_owned()) }
     }
 }
 
