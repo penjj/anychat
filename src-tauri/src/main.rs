@@ -782,7 +782,9 @@ fn remember_environment(webview: &Webview) {
 /// Joins the shared environment when one exists; the first child has none and
 /// creates it.
 #[cfg(windows)]
-fn with_shared_environment(builder: WebviewBuilder<'_>) -> WebviewBuilder<'_> {
+fn with_shared_environment<R: tauri::Runtime>(
+    builder: WebviewBuilder<R>,
+) -> WebviewBuilder<R> {
     match win_env::get() {
         Some(env) => builder.with_environment(env),
         None => builder,
