@@ -53,6 +53,19 @@ if wait_for '^SETTINGS ' 20; then
   fi
   # A row wider than the card escapes the panel and gets clipped by the window,
   # which is exactly how the shortcut picker broke when it was a button row.
+  # The settings panel is dismissed with an icon at the card's top-right.
+  # A square icon-sized target (not a text button), inset from the card's top
+  # and right edges rather than sitting inline with the title.
+  CB=$(echo "$LAST_SET" | sed -n 's/.*"closeBtn":{\([^}]*\)}.*/\1/p')
+  CBW=$(echo "$CB" | sed -n 's/.*"w":\([0-9]*\).*/\1/p')
+  CBR=$(echo "$CB" | sed -n 's/.*"rightGap":\([0-9]*\).*/\1/p')
+  CBT=$(echo "$CB" | sed -n 's/.*"topGap":\([0-9]*\).*/\1/p')
+  if [ -n "${CBW:-}" ] && [ "$CBW" -ge 20 ] && [ "$CBW" -le 32 ] \
+     && [ "${CBR:-999}" -le 30 ] && [ "${CBT:-999}" -le 30 ]; then
+    ok "settings-close-icon-at-top-right" 0 "w=$CBW top=$CBT right=$CBR"
+  else
+    ok "settings-close-icon-at-top-right" 1 "${CB:-no icon button}"
+  fi
   OV=$(echo "$LAST_SET" | sed -n 's/.*"overflow":\([0-9]*\).*/\1/p')
   if [ "${OV:-1}" = "0" ]; then
     ok "settings-no-overflow" 0 "all rows inside the card"
@@ -62,6 +75,7 @@ if wait_for '^SETTINGS ' 20; then
 else
   ok "settings-panel-visible" 1 "no SETTINGS line"
   ok "settings-card-width" 1 "no SETTINGS line"
+  ok "settings-close-icon-at-top-right" 1 "no SETTINGS line"
   ok "settings-no-overflow" 1 "no SETTINGS line"
 fi
 

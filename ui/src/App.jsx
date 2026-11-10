@@ -638,6 +638,21 @@ export default function App () {
         viewport: { w: window.innerWidth, h: window.innerHeight },
         // Anything wider than the card is clipped by the panel's own overflow,
         // which is how an over-long row used to escape the window edge.
+        // The dismiss control must exist, be an icon-sized target, and sit at
+        // the card's top-right. A text button there would satisfy "closes the
+        // panel" while failing the actual requirement.
+        closeBtn: (() => {
+          const b = document.querySelector('#settings-view .icon-btn')
+          if (!b) return null
+          const r = b.getBoundingClientRect()
+          const c = card.getBoundingClientRect()
+          return {
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            topGap: Math.round(r.top - c.top),
+            rightGap: Math.round(c.right - r.right),
+          }
+        })(),
         overflow: (() => {
           const rows = Array.from(document.querySelectorAll('#settings-view .row'))
           const cardRight = card.getBoundingClientRect().right
@@ -907,7 +922,12 @@ export default function App () {
 
       <div id="settings-view" hidden={!settingsOpen}>
         <div className="settings-card">
-          <h2>设置</h2>
+          <div className="card-head">
+            <h2>设置</h2>
+            <button className="icon-btn" title="关闭" aria-label="关闭" onClick={closeSettings}>
+              <Icon id="close" />
+            </button>
+          </div>
           <label className="row">
             <span>开机自启</span>
             <input
@@ -1064,9 +1084,6 @@ export default function App () {
               )}
             </div>
           )}
-          <div className="actions">
-            <button className="primary" onClick={closeSettings}>关闭</button>
-          </div>
         </div>
       </div>
     </>
