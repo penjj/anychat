@@ -2838,10 +2838,14 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
             !visible || std::env::var("ANYCHAT_DEMO_SHOW").is_ok(),
             format!("visible={visible}"),
         );
+        // An invisible window cannot take the keyboard, and Windows reports a
+        // hidden window as focused anyway. The property that matters is that a
+        // *visible* window did not steal focus -- that is what the user feels.
+        let focused = w.is_focused().unwrap_or(true);
         check(
             "window-not-focused",
-            !w.is_focused().unwrap_or(true) || std::env::var("ANYCHAT_DEMO_SHOW").is_ok(),
-            format!("focused={}", w.is_focused().unwrap_or(true)),
+            !visible || !focused || std::env::var("ANYCHAT_DEMO_SHOW").is_ok(),
+            format!("visible={visible} focused={focused}"),
         );
         let size = w.inner_size().map(|s| (s.width, s.height)).unwrap_or((0, 0));
         check("window-size", size.0 >= 560 && size.1 >= 420, format!("{size:?}"));
@@ -2985,18 +2989,37 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
             let _ = w.navigate(other);
         }
     }
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    let before = app.get_webview(&other_label)
-        .and_then(|w| w.url().ok())
-        .map(|u| u.to_string())
-        .unwrap_or_default();
+    // Wait for the navigation to land, not for a fixed delay. On a hosted
+    // runner the webview is still initialising 1.5s later and `url()` still
+    // reports about:blank, so the comparison below ran against a page that had
+    // not moved yet and failed for a reason unrelated to the shortcut.
+    let marker = "google.com";
+    let mut before = String::new();
+    for _ in 0..60 {
+        before = app.get_webview(&other_label)
+            .and_then(|w| w.url().ok())
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        if before.contains(marker) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
     let _ = new_chat(app.clone());
-    std::thread::sleep(std::time::Duration::from_millis(1800));
-    let after = app.get_webview(&other_label)
-        .and_then(|w| w.url().ok())
-        .map(|u| u.to_string())
-        .unwrap_or_default();
     let expected = tools::get(other_tool).map(|t| t.new_chat).unwrap_or("");
+    // Same reason: wait for the URL the shortcut asks for rather than assuming
+    // how long the navigation takes on this machine.
+    let mut after = String::new();
+    for _ in 0..60 {
+        after = app.get_webview(&other_label)
+            .and_then(|w| w.url().ok())
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        if !expected.is_empty() && after.contains(expected) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
     check(
         "cmd-n-new-chat",
         after.contains(expected.trim_end_matches('/')) || after == expected,

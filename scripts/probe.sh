@@ -179,16 +179,41 @@ fi
 say "state"
 wait_for '^RAIL ' 10
 BEFORE_RAIL=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
-BEFORE_SLOT=$(echo "$BEFORE_RAIL" | sed -n 's/.*"slot":{"w":\([0-9]*\),[^}]*}.*/\1/p')
-BEFORE_RAIL_W=$(echo "$BEFORE_RAIL" | sed -n 's/.*"railWidth":\([0-9]*\).*/\1/p')
+# Parsed, not pattern-matched. A hand-rolled sed expression over the report
+# silently yields a stale or wrong number when the shape of one field changes,
+# and the check then compares two numbers that never described the same thing.
+rail_field () {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    print("")
+    sys.exit(0)
+v = d
+for k in sys.argv[1].split("."):
+    v = v.get(k, "") if isinstance(v, dict) else ""
+print(v if v != "" else "")
+' "$2"
+}
+BEFORE_SLOT=$(rail_field "$BEFORE_RAIL" slot.w)
+BEFORE_RAIL_W=$(rail_field "$BEFORE_RAIL" railWidth)
 # Shrink, not grow. A hosted runner's virtual display can be smaller than the
 # 1300x900 this used to ask for, so `set_size` was clamped to the same width and
 # the content legitimately did not move -- a green check on a developer machine
 # and a red one in CI, for a reason that says nothing about the app. Shrinking is
 # available on every display.
-CUR_W=$(echo "$BEFORE_RAIL" | sed -n 's/.*"win":{"w":\([0-9]*\).*/\1/p')
+CUR_W=$(rail_field "$BEFORE_RAIL" win.w)
 # Relative to the window, so it shrinks whatever the display allows; the floor
 # keeps it above the app's own minimum, below which set_size is refused.
+# A missing width means the report never described the window, so there is
+# nothing to resize relative to. Recorded and folded into the verdict below
+# rather than reported here: two `ok` calls for one check would overcount.
+CUR_W_MISSING=0
+if [ -z "${CUR_W:-}" ]; then
+  CUR_W_MISSING=1
+  CUR_W=820
+fi
 SMALL_W=$(( CUR_W - 160 ))
 [ "$SMALL_W" -lt 560 ] && SMALL_W=560
 say "resize $SMALL_W 700"
@@ -200,17 +225,19 @@ say "resize $SMALL_W 700"
 # the rail reports repeatedly while settling, so a line count is satisfied by
 # an unchanged measurement and the check then compares 512 with 512.
 for _ in $(seq 1 80); do
-  W=$(grep '^RAIL ' "$LOG" | tail -1 | sed -n 's/.*"slot":{"w":\([0-9]*\).*/\1/p')
+  W=$(rail_field "$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')" slot.w)
   if [ -n "${W:-}" ] && [ "$W" != "$BEFORE_SLOT" ]; then break; fi
   sleep 0.25
 done
 AFTER=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
-AFTER_SLOT=$(echo "$AFTER" | sed -n 's/.*"slot":{"w":\([0-9]*\),[^}]*}.*/\1/p')
-AFTER_RAIL_W=$(echo "$AFTER" | sed -n 's/.*"railWidth":\([0-9]*\).*/\1/p')
-if [ -n "$BEFORE_SLOT" ] && [ -n "$AFTER_SLOT" ] && [ "$AFTER_SLOT" -ne "$BEFORE_SLOT" ]; then
+AFTER_SLOT=$(rail_field "$AFTER" slot.w)
+AFTER_RAIL_W=$(rail_field "$AFTER" railWidth)
+if [ "$CUR_W_MISSING" -eq 1 ]; then
+  ok "window-resize-moves-content" 1 "no window size in the rail report"
+elif [ -n "$BEFORE_SLOT" ] && [ -n "$AFTER_SLOT" ] && [ "$AFTER_SLOT" -ne "$BEFORE_SLOT" ]; then
   ok "window-resize-moves-content" 0 "slot ${BEFORE_SLOT} -> ${AFTER_SLOT}"
 else
-  ok "window-resize-moves-content" 1 "before=${BEFORE_SLOT:-none} after=${AFTER_SLOT:-none} (content did not follow the window)"
+  ok "window-resize-moves-content" 1 "before=${BEFORE_SLOT:-none} after=${AFTER_SLOT:-none} window=${CUR_W} asked=${SMALL_W}"
 fi
 # The rail keeps whatever width the user chose; the window does not stretch it.
 if [ -n "$AFTER_RAIL_W" ] && [ "$AFTER_RAIL_W" = "$BEFORE_RAIL_W" ]; then
