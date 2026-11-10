@@ -1446,7 +1446,38 @@ fn show_window(app: &tauri::AppHandle) {
         {
             let _ = window.show();
         }
+        #[cfg(not(target_os = "macos"))]
+        resume_empty_content_views(app);
         emit_state(app);
+    }
+}
+
+/// Re-issues navigation for content views that came up empty while hidden.
+///
+/// A WebView2 child created under a hidden parent can come back with no page:
+/// the controller exists, `url()` says about:blank, and the navigation it was
+/// built with was accepted and dropped. The first tool is created during setup,
+/// before the window is ever shown, so this is the normal path rather than an
+/// edge case -- and the visible result is a window with nothing in it.
+///
+/// Runs when the window is about to become visible, which is the first moment
+/// the browser behind the child will actually load anything.
+#[cfg(not(target_os = "macos"))]
+fn resume_empty_content_views(app: &tauri::AppHandle) {
+    let active = app.state::<App>().active.lock().unwrap().clone();
+    let label = format!("tool_{active}");
+    let Some(webview) = app.get_webview(&label) else {
+        return;
+    };
+    let Ok(url) = webview.url() else { return };
+    if url.as_str() != "about:blank" {
+        return;
+    }
+    let Some(tool) = tools::get(&active) else { return };
+    let Ok(target) = tool.url.parse() else { return };
+    match webview.navigate(target) {
+        Ok(()) => eprintln!("anychat: resumed empty content view {label}"),
+        Err(e) => eprintln!("anychat: could not resume {label}: {e}"),
     }
 }
 
@@ -3044,6 +3075,15 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
         .map(|t| t.id)
         .unwrap_or(default_tool);
     let other_label = format!("tool_{other_tool}");
+
+    // Reveal the window before creating a content view. A WebView2 child
+    // created under a hidden parent comes back with no page -- the controller
+    // exists and the navigation is dropped -- so creating one first would test
+    // a state the user never sees and report the white window this gate exists
+    // to catch as normal behaviour.
+    if let Some(w) = &win {
+        let _ = w.show();
+    }
 
     let handled = select_tool(app.clone(), other_tool.to_string());
     check("select-tool", handled.is_ok(), format!("{handled:?}"));
