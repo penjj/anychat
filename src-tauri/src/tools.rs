@@ -48,7 +48,7 @@ pub const TOOLS: &[Tool] = &[
     t("zhipu", "智谱清言", "cn", "https://chatglm.cn/", "https://chatglm.cn/"),
     t("hailuo", "海螺 AI", "cn", "https://hailuoai.com/", "https://hailuoai.com/"),
     t("spark", "星火", "cn", "https://xinghuo.xfyun.cn/desk", "https://xinghuo.xfyun.cn/desk"),
-    t("zai", "Z.ai", "cn", "https://chat.z.ai/", "https://chat.z.ai/"),
+    t("zai", "Z.ai", "cn", "https://zchat.z.ai/", "https://zchat.z.ai/"),
     // ---- 构建 ----
     t("githubcopilot", "GitHub Copilot", "build", "https://github.com/copilot", "https://github.com/copilot"),
     t("v0", "v0", "build", "https://v0.app/", "https://v0.app/"),
