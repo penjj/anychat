@@ -310,11 +310,20 @@ else
 fi
 # Resizing flashed a white block in the corner: `transparent` in the config only
 # permits alpha, the window still had an opaque default background.
+# Only macOS reports this, and only macOS has the defect it guards: the white
+# flash came from the NSWindow's opaque default background, which `transparent`
+# in the config does not change. WebView2 takes the configured transparency
+# directly, so on Windows there is nothing to read and nothing that can flash.
 WT=$(grep 'PROBE window transparent=' "$LOG" | tail -1)
-case "$WT" in
-  *'transparent=true clearBg=true'*) ok "window-transparent-without-white-flash" 0 "$WT" ;;
-  *) ok "window-transparent-without-white-flash" 1 "${WT:-no report}" ;;
-esac
+if [ -z "${WT:-}" ] && [ "${OSTYPE:-}" != darwin* ]; then
+  SKIPPED=$((SKIPPED + 1))
+  echo "SKIP window-transparent-without-white-flash  not reported on this platform"
+else
+  case "$WT" in
+    *'transparent=true clearBg=true'*) ok "window-transparent-without-white-flash" 0 "$WT" ;;
+    *) ok "window-transparent-without-white-flash" 1 "${WT:-no report}" ;;
+  esac
+fi
 # Restore the window before the checks that assume a wide one. Waited for, not
 # slept on: a resize takes seconds on a hosted runner, and a fixed sleep let the
 # narrow window leak into the next three checks, which then measured a layout
