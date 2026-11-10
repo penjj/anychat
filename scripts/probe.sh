@@ -177,6 +177,22 @@ TOP=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
 # asserted here, and not in the in-process gate, because that gate holds the
 # main thread and the state event that fills the rail cannot be delivered while
 # it waits.
+#
+# The layout checks that used to live in that gate moved here for the same
+# reason: they read the rail's own report.
+TOP_W=$(rail_field "$TOP" slot.w)
+TOP_H=$(rail_field "$TOP" slot.h)
+if [ -n "${TOP_W:-}" ] && [ -n "${TOP_H:-}" ] && [ "$TOP_W" -gt 200 ] && [ "$TOP_H" -gt 200 ]; then
+  ok "slot-has-area" 0 "${TOP_W}x${TOP_H}"
+else
+  ok "slot-has-area" 1 "${TOP_W:-none}x${TOP_H:-none}"
+fi
+TOP_ACTIVE=$(rail_field "$TOP" active)
+if [ -n "${TOP_ACTIVE:-}" ]; then
+  ok "active-tool-marked" 0 "active=$TOP_ACTIVE"
+else
+  ok "active-tool-marked" 1 "no active tool in the report"
+fi
 PIN=$(rail_field "$TOP" pinned)
 if [ "$PIN" = "10" ]; then
   ok "frequent-group-has-10" 0 "pinned=$PIN"
