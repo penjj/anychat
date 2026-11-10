@@ -2632,21 +2632,26 @@ fn run_probe_command(h: tauri::AppHandle, cmd: String) {
                                 // compare two identical, stale numbers.
                                 let want = (parts[0], parts[1]);
                                 let mut got = String::new();
-                                // Two seconds. Longer only delays every later
-                                // command, and the report below carries enough
-                                // to see whether the resize was applied or not.
-                                for _ in 0..40 {
-                                    let now = w.inner_size().ok();
-                                    let hit = now
-                                        .map(|v| {
-                                            let (cw, ch) = (v.width as f64, v.height as f64);
-                                            (cw - want.0).abs() <= 2.0 && (ch - want.1).abs() <= 2.0
-                                        })
-                                        .unwrap_or(false);
-                                    got = now
-                                        .map(|v| format!("{}x{}", v.width, v.height))
-                                        .unwrap_or_else(|| "?".into());
-                                    if hit {
+                                // Fifteen seconds. Measured on a hosted runner:
+                                // the window server applies a resize in seconds,
+                                // not in frames, and a shorter bound reports the
+                                // previous size as if the request were refused.
+                                // The driver waits for this line before moving on,
+                                // so the extra time costs one step, not every step.
+                                // Compared in logical units. `inner_size` returns
+                                // physical pixels, so on a 2.5x display a request
+                                // for 660x700 reads back as 1640x1202 and never
+                                // matches a logical comparison -- which made this
+                                // wait spin for its whole budget and then report a
+                                // resize that had in fact succeeded.
+                                let scale = w.scale_factor().unwrap_or(1.0);
+                                for _ in 0..300 {
+                                    let Ok(size) = w.inner_size() else { break };
+                                    let logical = size.to_logical::<f64>(scale);
+                                    got = format!("{:.0}x{:.0}", logical.width, logical.height);
+                                    if (logical.width - want.0).abs() <= 2.0
+                                        && (logical.height - want.1).abs() <= 2.0
+                                    {
                                         break;
                                     }
                                     std::thread::sleep(std::time::Duration::from_millis(50));

@@ -230,7 +230,16 @@ if [ -z "${CUR_W:-}" ]; then
 fi
 SMALL_W=$(( CUR_W - 160 ))
 [ "$SMALL_W" -lt 560 ] && SMALL_W=560
+# Wait for the app to report the resize before reading geometry. The command
+# takes seconds to apply on a hosted runner, and `say` only waits 1.2s, so the
+# read below always described the window as it was before the resize.
+RESIZE_LINES=$(grep -c 'PROBE resized=' "$LOG" 2>/dev/null || echo 0)
 say "resize $SMALL_W 700"
+for _ in $(seq 1 240); do
+  NOW=$(grep -c 'PROBE resized=' "$LOG" 2>/dev/null || echo 0)
+  [ "$NOW" -gt "$RESIZE_LINES" ] && break
+  sleep 0.25
+done
 # Wait for the rail to report the new geometry. A fixed sleep read the last
 # pre-resize line whenever the window took longer than it to settle, which made
 # this check fail with before and after both equal -- looking like the content
@@ -273,8 +282,17 @@ case "$WT" in
   *'transparent=true clearBg=true'*) ok "window-transparent-without-white-flash" 0 "$WT" ;;
   *) ok "window-transparent-without-white-flash" 1 "${WT:-no report}" ;;
 esac
+# Restore the window before the checks that assume a wide one. Waited for, not
+# slept on: a resize takes seconds on a hosted runner, and a fixed sleep let the
+# narrow window leak into the next three checks, which then measured a layout
+# that was correct for a window that was no longer there.
+RESIZE_LINES=$(grep -c 'PROBE resized=' "$LOG" 2>/dev/null || echo 0)
 say "resize 980 760"
-sleep 2
+for _ in $(seq 1 240); do
+  NOW=$(grep -c 'PROBE resized=' "$LOG" 2>/dev/null || echo 0)
+  [ "$NOW" -gt "$RESIZE_LINES" ] && break
+  sleep 0.25
+done
 
 # 3a. dragging narrow must drop to an icon strip, not squeeze the labels.
 say "rail.width60"
