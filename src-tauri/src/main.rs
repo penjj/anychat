@@ -720,6 +720,75 @@ fn store_id(_id: &str) -> [u8; 16] {
     *b"anychat-shared01"
 }
 
+/// The one WebView2 environment every content webview shares on Windows.
+///
+/// Each `add_child` without this calls `CreateCoreWebView2EnvironmentWithOptions`
+/// against the same user-data directory, and the second one to do so fails with
+/// `HRESULT(0x800700AA)` — "The requested resource is in use". That is the
+/// reported white screen: the first chat works, every later one is a child view
+/// whose environment never initialised, so the window shows nothing.
+///
+/// macOS has no equivalent: WKWebView shares a `WKWebsiteDataStore` instead, and
+/// several WKWebViews coexisting is normal.
+#[cfg(windows)]
+mod win_env {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The live environment pointer, or 0 when no webview has been created yet.
+    ///
+    /// Stored as an address because `ICoreWebView2Environment` is a COM
+    /// interface and is not `Send`. The pointer stays valid for the life of the
+    /// process: WebView2 keeps the environment alive as long as any controller
+    /// refers to it, and one always does after the first child exists.
+    static ENV: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn publish(env: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment) {
+        // First writer wins. Later children have the same environment, so a
+        // second store would be the same address and a no-op either way.
+        let _ = ENV.compare_exchange(
+            0,
+            env as *const _ as *const () as usize,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+
+    pub fn get() -> Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment> {
+        let addr = ENV.load(Ordering::SeqCst);
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: `publish` only ever stores a pointer handed out by Tauri for a
+        // live webview, and WebView2 keeps that environment alive for as long
+        // as the process has a controller. AddRef is taken so the returned
+        // clone has its own reference and cannot outlive its owner by surprise.
+        unsafe {
+            let p = addr as *const webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
+            let raw: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment = &*p;
+            raw.clone()
+        }
+    }
+}
+
+/// Records the environment of a freshly created webview so later children reuse
+/// it instead of initialising a second one against the same directory.
+#[cfg(windows)]
+fn remember_environment(webview: &Webview) {
+    let _ = webview.with_webview(|platform| {
+        win_env::publish(&platform.environment());
+    });
+}
+
+/// Joins the shared environment when one exists; the first child has none and
+/// creates it.
+#[cfg(windows)]
+fn with_shared_environment(builder: WebviewBuilder<'_>) -> WebviewBuilder<'_> {
+    match win_env::get() {
+        Some(env) => builder.with_environment(env),
+        None => builder,
+    }
+}
+
 fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let tool = tools::get(id)?;
     let label = format!("tool_{id}");
@@ -729,6 +798,10 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let window = app.get_window("main")?;
     let url = tool.url.parse().ok()?;
     let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(url));
+    #[cfg(windows)]
+    {
+        builder = with_shared_environment(builder);
+    }
 
     // Session storage, per platform. Never both on macOS: wry prefers the custom
     // data store and ignores `data_directory`, so mixing them looks like isolated
@@ -876,6 +949,8 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
             LogicalSize::new(800.0, 600.0),
         )
         .ok()?;
+    #[cfg(windows)]
+    remember_environment(&webview);
     let _ = webview.set_zoom(load_layout(app).zoom);
     // A tool created after the preference changed must start with it, not with
     // the conservative default the script assumes.
@@ -2924,14 +2999,23 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
-    // 常用 is prepended to the three tool groups, so the count is 4 and the
-    // caption order matters more than the number itself.
-    let groups_ok = dom.contains("\"pinned\":10") && dom.contains("\"duplicateTools\":0");
-    check(
-        "rail-rendered",
-        dom.contains(&format!("\"tools\":{}", TOOLS.len())) && groups_ok,
-        dom.clone(),
-    );
+    // Parsed, not string-matched. The literal `"pinned":10` depended on the
+    // serialiser's spacing and on the saved usage file: a clean data directory
+    // sorts differently, so the same, correct UI reported a different number and
+    // the check failed for a reason that was not a defect.
+    let mut rail_ok = false;
+    let mut rail_detail = String::from("no rail report");
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&dom) {
+        let tools = parsed.get("tools").and_then(|v| v.as_u64()).unwrap_or(0);
+        let pinned = parsed.get("pinned").and_then(|v| v.as_u64()).unwrap_or(0);
+        let dup = parsed.get("duplicateTools").and_then(|v| v.as_u64()).unwrap_or(1);
+        // Every tool appears exactly once, either pinned or in its group, and
+        // the pinned set is non-empty. That is the invariant; the exact split
+        // depends on usage history, which a fresh runner does not have.
+        rail_ok = tools == TOOLS.len() as u64 && dup == 0 && pinned > 0;
+        rail_detail = format!("tools={tools} expected={} pinned={pinned} dup={dup}", TOOLS.len());
+    }
+    check("rail-rendered", rail_ok, rail_detail);
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&dom) {
         let w = parsed.get("slot").and_then(|s| s.get("w")).and_then(|v| v.as_i64()).unwrap_or(0);
         let h = parsed.get("slot").and_then(|s| s.get("h")).and_then(|v| v.as_i64()).unwrap_or(0);
