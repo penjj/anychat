@@ -882,13 +882,21 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(url));
     #[cfg(windows)]
     {
-        // The first content view has nobody to wait for; every later one waits
-        // for the environment its predecessor publishes on a background thread.
-        if win_env::content_views() > 0 {
-            let _ = wait_for_environment(std::time::Duration::from_secs(3));
+        // Diagnostic escape hatch: ANYCHAT_NO_SHARED_ENV=1 makes each content
+        // view build its own environment. Two views over one user-data
+        // directory then collide with ERROR_BUSY, so this is not a supported
+        // mode -- it exists to tell "the shared environment broke navigation"
+        // apart from "navigation is broken anyway".
+        if std::env::var("ANYCHAT_NO_SHARED_ENV").is_err() {
+            // The first content view has nobody to wait for; every later one
+            // waits for the environment its predecessor publishes on a
+            // background thread.
+            if win_env::content_views() > 0 {
+                let _ = wait_for_environment(std::time::Duration::from_secs(3));
+            }
+            win_env::count_content_view();
+            builder = with_shared_environment(builder);
         }
-        win_env::count_content_view();
-        builder = with_shared_environment(builder);
     }
 
     // Session storage, per platform. Never both on macOS: wry prefers the custom
