@@ -197,8 +197,18 @@ fi
 # 3-window. The window must be elastic: resizing it has to move the content
 # webview with it. It used to stay at its old geometry, leaving the page
 # floating in the middle of a bigger window.
+# Wait for a report produced *after* this command, not merely for one to exist.
+# `wait_for` matches any line already in the log, so it returned at once and the
+# line below read an older report -- a 672-wide window instead of the 980-wide
+# one on screen -- and every number after it described a window that was not
+# there. Counting lines first makes "the newest report" mean what it says.
+RAIL_BEFORE_COUNT=$(grep -c '^RAIL ' "$LOG" 2>/dev/null || echo 0)
 say "state"
-wait_for '^RAIL ' 10
+for _ in $(seq 1 60); do
+  NOW=$(grep -c '^RAIL ' "$LOG" 2>/dev/null || echo 0)
+  [ "$NOW" -gt "$RAIL_BEFORE_COUNT" ] && break
+  sleep 0.25
+done
 BEFORE_RAIL=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
 BEFORE_SLOT=$(rail_field "$BEFORE_RAIL" slot.w)
 BEFORE_RAIL_W=$(rail_field "$BEFORE_RAIL" railWidth)
