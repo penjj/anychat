@@ -1039,50 +1039,37 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
         .ok()?;
     #[cfg(windows)]
     {
-        // Published from a background context, never from here. `with_webview`
-        // runs its closure inline when the caller is already on the main
-        // thread, and asking a just-created child for its environment re-enters
-        // creation and never returns -- which is why this line used to hang the
-        // window: the child existed, nothing printed after it, and every later
-        // tool inherited an environment that was never published.
-        //
-        // Queued through the runtime instead: by the time the message runs, the
-        // webview is past this frame and the call completes.
-        {
-            let late = webview.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                remember_environment(&late);
-            });
-        }
-        // A content view that reports about:blank here never received the
-        // navigation it was built with, and every later read agrees. Printed
-        // once per creation, so a white window has a line that says which side
-        // of the handoff it came from.
-        let probe = webview.clone();
-        let initial = probe
-            .url()
-            .map(|u| u.to_string())
-            .unwrap_or_else(|e| format!("err:{e}"));
-        println!("TOOLURL {label} initial={initial}");
-        // If the child came up without the navigation it was built with, issue
-        // it explicitly. WebView2 accepts a controller before the underlying
-        // browser has finished starting, and a `Navigate` issued in that window
-        // is dropped without an error, which is why this is not reported as a
-        // failure: the view is real, it simply has nothing in it.
-        if initial == "about:blank" {
-            if let Ok(target) = tools::get(id).map(|t| t.url).unwrap_or_default().parse() {
-                match probe.navigate(target) {
-                    Ok(()) => println!("TOOLURL {label} reissued"),
-                    Err(e) => println!("TOOLURL {label} reissue-err {e}"),
+        // Everything below runs off the creation frame. Asking a webview that
+        // is still being created for its URL blocks: `url()` goes through the
+        // same channel as creation and is queued behind the frame that has not
+        // returned yet. That single call was the whole stall -- the child
+        // existed, nothing printed after it, and the window stayed white.
+        let late = webview.clone();
+        let report_label = label.clone();
+        std::thread::spawn(move || {
+            // Long enough for creation to finish and the browser to start.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            // Publishing first: every later content view waits for it.
+            remember_environment(&late);
+            let initial = late
+                .url()
+                .map(|u| u.to_string())
+                .unwrap_or_else(|e| format!("err:{e}"));
+            println!("TOOLURL {report_label} initial={initial}");
+            if initial == "about:blank" {
+                // The controller can exist before the browser behind it, and a
+                // navigation issued in that window is dropped without an error.
+                if let Ok(target) = tools::get(id).map(|t| t.url).unwrap_or_default().parse() {
+                    match late.navigate(target) {
+                        Ok(()) => println!("TOOLURL {report_label} reissued"),
+                        Err(e) => println!("TOOLURL {report_label} reissue-err {e}"),
+                    }
                 }
             }
-        }
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(3000));
+            std::thread::sleep(std::time::Duration::from_millis(2500));
             println!(
-                "TOOLURL {label} settled={:?}",
-                probe.url().map(|u| u.to_string()).unwrap_or_else(|e| format!("err:{e}"))
+                "TOOLURL {report_label} settled={:?}",
+                late.url().map(|u| u.to_string()).unwrap_or_else(|e| format!("err:{e}"))
             );
         });
     }
