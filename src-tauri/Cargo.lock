@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "anychat"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "objc2",
  "objc2-app-kit",

@@ -13,6 +13,9 @@
      a near-black mark (GitHub, OpenAI) vanishes on this background; giving every
      icon a faint plate makes those legible without tinting the coloured ones. */
   --mark-plate: #f2f2f5;
+  /* 0 on the dark rail, 1 on the light one. Read by the icon plate logic so it
+     resolves the theme exactly as the cascade does. */
+  --is-light: 0;
   --rail-w: 56px;
   --bar-h: 40px;
   --traffic-h: 40px;
@@ -40,6 +43,7 @@
   --border: #dcdce3;
   --accent: #4a5bd8;
   --mark-plate: #2a2a30;
+  --is-light: 1;
 }
 
 @media (prefers-color-scheme: light) {
@@ -53,6 +57,7 @@
     --border: #dcdce3;
     --accent: #4a5bd8;
     --mark-plate: #2a2a30;
+    --is-light: 1;
   }
 }
 
@@ -69,6 +74,7 @@
     --border: #2a2a30;
     --accent: #7c8cff;
     --mark-plate: #f2f2f5;
+    --is-light: 0;
   }
 }
 
@@ -485,7 +491,20 @@ input:focus-visible {
   z-index: 5;
   pointer-events: none;
 }
-#progress.on { opacity: 1; width: 100%; transition: width 5s ease-out, opacity 0.3s 2s; }
+/* Sweep shown while a new conversation loads.
+   The bar has no real progress to report -- the page is another origin and its
+   load events never reach us -- so it animates on a fixed 900ms curve and is
+   removed by the caller. Honest indirection: it says "something is happening"
+   and stops, rather than pretending to measure. */
+#progress.on {
+  opacity: 1;
+  animation: sweep 900ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+@keyframes sweep {
+  from { width: 0; opacity: 1; }
+  70%  { width: 100%; opacity: 1; }
+  to   { width: 100%; opacity: 0; }
+}
 
 /* ---------- settings ---------- */
 
@@ -557,12 +576,44 @@ input:focus-visible {
 .head-btn:hover { background: var(--hover); color: var(--fg); }
 
 .zoom-controls { display: flex; align-items: center; gap: 8px; }
+/* grid + place-items centres the glyph. As an inline-block the SVG sat on the
+   text baseline and the +/- rode high inside the box. */
 .zoom-controls button {
   width: 22px; height: 22px; border-radius: 5px;
   background: var(--elev); border: 1px solid var(--border);
   font-size: 13px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  line-height: 1;
 }
+.zoom-controls button .ico { width: 12px; height: 12px; }
 .zoom-controls button:hover { background: var(--hover); }
+
+/* Accelerator capture field. Reads as a key cap rather than a text input: there
+   is nothing to type, and a caret would invite the user to. */
+.shortcut-field {
+  min-width: 132px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--elev);
+  color: var(--fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+.shortcut-field:hover { background: var(--hover); }
+/* While listening, the field is the focus: a steady accent outline says the
+   next keystroke will be taken, and pulsing would compete with the arrow it
+   wants the user to press. */
+.shortcut-field.recording {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--hover);
+}
 
 /* Native select styled to match the panel. Used where the option list would be
    too wide to lay out inline -- five accelerators, for instance, overflowed the

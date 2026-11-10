@@ -1556,6 +1556,10 @@ fn new_chat(app: tauri::AppHandle) -> Result<(), String> {
     let url = tool.new_chat.parse().map_err(|e| format!("{e}"))?;
     let webview = build_tool_webview(&app, &active).ok_or("no webview")?;
     webview.navigate(url).map_err(|e| e.to_string())?;
+    // ⌘N also arrives from a tool page, where the rail's own handler never runs.
+    // Announcing here means the acknowledgement appears however the shortcut was
+    // pressed, rather than only when it started in the rail.
+    let _ = app.emit_to(RAIL_LABEL, "new-chat", ());
     emit_state(&app);
     Ok(())
 }

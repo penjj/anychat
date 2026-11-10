@@ -193,26 +193,67 @@ function iconLuminance (src) {
   return null
 }
 
-/** Mirrors SHORTCUT_CHOICES in main.rs. Value is the Tauri accelerator string;
- *  label is what the picker shows. Keep both lists in step. */
-const SHORTCUT_CHOICES = [
-  ['Alt+Space', '⌥ Space'],
-  ['Ctrl+Alt+Space', 'Ctrl+Alt+Space'],
-  ['Alt+Shift+Space', '⌥⇧ Space'],
-  ['Ctrl+Shift+Space', 'Ctrl+Shift+Space'],
-  ['Super+Shift+A', '⌘⇧ A'],
-]
+/** True when the event carries a key other than a modifier.
+ *
+ *  A capture that committed on a modifier alone would bind Ctrl the moment the
+ *  user reached for Ctrl+Alt+Space, so the field waits for the real key. */
+function hasNonModifier (e) {
+  return !['Control', 'Alt', 'Shift', 'Meta', 'AltGraph'].includes(e.key)
+}
+
+/** Builds a Tauri accelerator from a keydown.
+ *
+ *  Order matches what Tauri and the menu display expect. Returns '' while only
+ *  modifiers are held, which the field shows as a prompt rather than a value. */
+function accelFromEvent (e) {
+  const parts = []
+  if (e.metaKey) parts.push('Super')
+  if (e.ctrlKey) parts.push('Control')
+  if (e.altKey) parts.push('Alt')
+  if (e.shiftKey) parts.push('Shift')
+  if (!hasNonModifier(e)) return parts.join('+')
+
+  // Keys Tauri names differently from the DOM.
+  const key = {
+    ' ': 'Space',
+    Escape: '',
+    ArrowUp: 'Up',
+    ArrowDown: 'Down',
+    ArrowLeft: 'Left',
+    ArrowRight: 'Right',
+    Enter: 'Return',
+  }[e.key] ?? e.key
+
+  if (!key) return ''
+  // A lone character with no modifier would capture ordinary typing, so only
+  // function keys and Space are allowed bare.
+  const bare = /^F[0-9]{1,2}$/.test(key) || key === 'Space'
+  if (parts.length === 0 && !bare) return ''
+
+  // Single characters use the physical key layout: Shift+1 is "!", and a global
+  // shortcut has to be expressed as the key that was pressed, not its symbol.
+  let final = key
+  if (key.length === 1) {
+    const code = e.code || ''
+    if (/^Key[A-Z]$/.test(code)) final = code.slice(3)
+    else if (/^Digit[0-9]$/.test(code)) final = code.slice(5)
+    else final = key.toUpperCase()
+  }
+  parts.push(final)
+  return parts.join('+')
+}
 
 /** Turns the accelerator into the glyphs the platform actually shows. */
 function prettyShortcut (accel) {
   if (!accel) return ''
   const mac = navigator.platform.toLowerCase().includes('mac')
+  // Word boundaries matter: a naive replace turns "Control" into "⌃ontrol".
+  const parts = accel.split('+')
   if (mac) {
-    return accel
-      .replace('Alt', '⌥').replace('Shift', '⇧').replace('Super', '⌘')
-      .replace('Ctrl', '⌃').replaceAll('+', ' ')
+    const glyph = { Super: '⌘', Control: '⌃', Ctrl: '⌃', Alt: '⌥', Shift: '⇧' }
+    return parts.map((p) => glyph[p] ?? p).join(' ')
   }
-  return accel.replaceAll('+', ' + ')
+  return parts.map((p) => (p === 'Super' ? 'Win' : p)).join(' + ')
 }
 
 function Mark ({ tool, broken, onBreak }) {
@@ -220,14 +261,31 @@ function Mark ({ tool, broken, onBreak }) {
   useEffect(() => {
     const f = () => bump((n) => n + 1)
     window.addEventListener('anychat:icon-lum', f)
-    return () => window.removeEventListener('anychat:icon-lum', f)
+    // The plate depends on the live palette, which the browser resolves without
+    // telling React. A system appearance change flips it under a running window,
+    // so the mark has to re-evaluate when that happens.
+    const mq = window.matchMedia('(prefers-color-scheme: light)')
+    mq.addEventListener('change', f)
+    return () => {
+      window.removeEventListener('anychat:icon-lum', f)
+      mq.removeEventListener('change', f)
+    }
   }, [])
 
   if (tool.icon && !broken) {
     const lum = iconLuminance(tool.icon)
-    // Either extreme needs a plate: too dark for a dark rail, too bright for a
-    // light one. Mid-range marks carry their own contrast and get none.
-    const needsPlate = lum !== null && (lum < 70 || lum > 200)
+    // Only a mark that would vanish needs a plate, and which one that is depends
+    // on the rail. On a dark rail a near-black glyph disappears; on a light rail
+    // the dark plate behind it does, so the plate is skipped there unless the
+    // glyph is near-white. The previous rule applied both extremes on both
+    // themes, which put a dark square behind every bright icon in light mode.
+    // Resolved by the cascade, not guessed here. The attribute can say "auto",
+    // and a media query alone cannot express "auto on a dark system but the user
+    // picked light". Reading the same variable the stylesheet sets keeps the two
+    // from disagreeing.
+    const light =
+      getComputedStyle(document.documentElement).getPropertyValue('--is-light').trim() === '1'
+    const needsPlate = lum !== null && (light ? lum > 200 : lum < 70)
     return (
       <img
         className={cl('favicon', needsPlate && 'on-plate')}
@@ -319,6 +377,8 @@ export default function App () {
   // Last rebinding failure, so the panel can name the keys that were refused
   // instead of only showing that something went wrong.
   const [shortcutError, setShortcutError] = useState('')
+  const [recording, setRecording] = useState(false)
+  const [pendingShortcut, setPendingShortcut] = useState('')
   // { info, notes, busy, installing, progress }: `info` is the backend's answer,
   // `notes` carries a transport failure that never became an answer, and
   // `progress` is 0-1 while the payload downloads.
@@ -531,6 +591,12 @@ export default function App () {
     let alive = true
     const unlisten = []
 
+    // Driven by the backend so the sweep runs whether ⌘N was pressed in the
+    // rail or inside a tool page, which cannot see the rail's handlers.
+    events.listen('new-chat', () => { if (alive) sweepRef.current() })
+      .then((f) => alive && unlisten.push(f))
+      .catch(() => {})
+
     events.listen('state', (e) => { if (alive) adoptState(e.payload) })
       .then((f) => alive && unlisten.push(f))
       .catch(() => {})
@@ -623,9 +689,29 @@ export default function App () {
     } catch (_) {}
   }, [])
 
+  // A new conversation navigates a cross-origin page, so there is no load event
+  // to wait for and no way to report real progress. The sweep is a fixed
+  // acknowledgement that the request was taken; it clears itself.
+  const sweep = useCallback(() => {
+    const bar = document.getElementById('progress')
+    if (!bar) return
+    bar.classList.remove('on')
+    // Force a reflow so a second ⌘N restarts the animation instead of being
+    // ignored because the class was already present.
+    void bar.offsetWidth
+    bar.classList.add('on')
+    setTimeout(() => bar.classList.remove('on'), 950)
+  }, [])
+
+  // Held in a ref because the event listener is registered once, before this
+  // callback exists, and must call the current version rather than a stale one.
+  const sweepRef = useRef(() => {})
+  useEffect(() => { sweepRef.current = sweep }, [sweep])
+
   const newChat = useCallback(() => {
+    sweep()
     invoke('new_chat').then(() => setTimeout(refreshUrl, 700)).catch(() => {})
-  }, [refreshUrl])
+  }, [refreshUrl, sweep])
 
   const nav = useCallback((action) => {
     invoke('nav', { action }).then(() => setTimeout(refreshUrl, 500)).catch(() => {})
@@ -1042,34 +1128,57 @@ export default function App () {
           </div>
           <div className="row">
             <span>召唤快捷键</span>
-            {/* A select, not a row of buttons: five accelerators laid out
-                inline overflow the settings card and push the panel past the
-                window edge. The list also grows without limit if more are
-                added, while a dropdown stays one line. */}
-            <select
-              className="select"
+            {/* Capture, not a fixed list: the accelerator space is large and
+                which combinations are free differs per machine, so offering
+                five presets meant the one a user wanted was often absent. The
+                backend still validates -- an occupied combination is refused and
+                the previous binding restored -- so the user learns immediately
+                rather than after a summon that does nothing. */}
+            <button
+              className={cl('shortcut-field', recording && 'recording')}
               aria-label="召唤快捷键"
-              value={state.shortcut}
-              onChange={async (e) => {
-                const value = e.target.value
+              title="点击后按下想要的组合键，Esc 取消"
+              onClick={() => {
+                setRecording(true)
+                setPendingShortcut('')
+              }}
+              onKeyDown={async (e) => {
+                if (!recording) return
+                e.preventDefault()
+                e.stopPropagation()
+                if (e.key === 'Escape') {
+                  setRecording(false)
+                  setPendingShortcut('')
+                  return
+                }
+                const accel = accelFromEvent(e)
+                if (!accel) {
+                  setPendingShortcut('')
+                  return
+                }
+                setPendingShortcut(accel)
+                if (!hasNonModifier(e)) return
+                setRecording(false)
                 const before = state.shortcut
                 try {
-                  const actual = await invoke('set_shortcut', { shortcut: value })
+                  const actual = await invoke('set_shortcut', { shortcut: accel })
                   setState((p) => ({ ...p, shortcut: actual, shortcut_ok: true }))
                   setShortcutError('')
                 } catch (err) {
-                  // Rebinding is refused when another app already owns the
-                  // keys, and the backend restores the old binding, so the panel
-                  // only has to revert the control and explain why.
                   setState((p) => ({ ...p, shortcut: before, shortcut_ok: false }))
                   setShortcutError(String(err))
                 }
+                setPendingShortcut('')
+              }}
+              onBlur={() => {
+                setRecording(false)
+                setPendingShortcut('')
               }}
             >
-              {SHORTCUT_CHOICES.map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
+              {recording
+                ? (pendingShortcut ? prettyShortcut(pendingShortcut) : '按下组合键…')
+                : prettyShortcut(state.shortcut)}
+            </button>
           </div>
           <div className={cl('hint', state.shortcut_ok === false && 'warn')}>
             {state.shortcut_ok === false
