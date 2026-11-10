@@ -72,6 +72,23 @@ cleanup () {
 
 PASS=0; FAIL=0
 ok () { if [ "$2" -eq 0 ]; then echo "PASS $1"; PASS=$((PASS + 1)); else echo "FAIL $1${3:+  $3}"; FAIL=$((FAIL + 1)); fi; }
+# Parsed, not pattern-matched. A hand-rolled sed expression over the report
+# silently yields a stale or wrong number when the shape of one field changes,
+# and the check then compares two numbers that never described the same thing.
+rail_field () {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    print("")
+    sys.exit(0)
+v = d
+for k in sys.argv[1].split("."):
+    v = v.get(k, "") if isinstance(v, dict) else ""
+print(v if v != "" else "")
+' "$2"
+}
 
 # 1. rail reports its DOM at all
 wait_for '^RAIL ' 25; ok "rail-reports-dom" $?
@@ -156,7 +173,11 @@ fi
 
 # 3-top. 常用 must lead the rail with exactly 10 unique entries.
 TOP=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
-PIN=$(echo "$TOP" | sed -n 's/.*"pinned":\([0-9]*\).*/\1/p')
+# `rail-has-N-tools` above already proves the rail drew the full list; it is
+# asserted here, and not in the in-process gate, because that gate holds the
+# main thread and the state event that fills the rail cannot be delivered while
+# it waits.
+PIN=$(rail_field "$TOP" pinned)
 if [ "$PIN" = "10" ]; then
   ok "frequent-group-has-10" 0 "pinned=$PIN"
 else
@@ -179,23 +200,6 @@ fi
 say "state"
 wait_for '^RAIL ' 10
 BEFORE_RAIL=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
-# Parsed, not pattern-matched. A hand-rolled sed expression over the report
-# silently yields a stale or wrong number when the shape of one field changes,
-# and the check then compares two numbers that never described the same thing.
-rail_field () {
-  printf '%s' "$1" | python3 -c '
-import json, sys
-try:
-    d = json.loads(sys.stdin.read())
-except Exception:
-    print("")
-    sys.exit(0)
-v = d
-for k in sys.argv[1].split("."):
-    v = v.get(k, "") if isinstance(v, dict) else ""
-print(v if v != "" else "")
-' "$2"
-}
 BEFORE_SLOT=$(rail_field "$BEFORE_RAIL" slot.w)
 BEFORE_RAIL_W=$(rail_field "$BEFORE_RAIL" railWidth)
 # Shrink, not grow. A hosted runner's virtual display can be smaller than the
