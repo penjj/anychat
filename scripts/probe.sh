@@ -233,11 +233,13 @@ SMALL_W=$(( CUR_W - 160 ))
 # Wait for the app to report the resize before reading geometry. The command
 # takes seconds to apply on a hosted runner, and `say` only waits 1.2s, so the
 # read below always described the window as it was before the resize.
-RESIZE_LINES=$(grep -c 'PROBE resized=' "$LOG" 2>/dev/null || echo 0)
+# Wait for the window to actually be the new width, as the page reports it. The
+# app cannot do this wait itself: the command runs on its main thread, and
+# blocking there stops the resize it is waiting for.
 say "resize $SMALL_W 700"
 for _ in $(seq 1 240); do
-  NOW=$(grep -c 'PROBE resized=' "$LOG" 2>/dev/null || echo 0)
-  [ "$NOW" -gt "$RESIZE_LINES" ] && break
+  W=$(rail_field "$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')" win.w)
+  if [ -n "${W:-}" ] && [ "$W" != "$CUR_W" ]; then break; fi
   sleep 0.25
 done
 # Wait for the rail to report the new geometry. A fixed sleep read the last
@@ -286,11 +288,10 @@ esac
 # slept on: a resize takes seconds on a hosted runner, and a fixed sleep let the
 # narrow window leak into the next three checks, which then measured a layout
 # that was correct for a window that was no longer there.
-RESIZE_LINES=$(grep -c 'PROBE resized=' "$LOG" 2>/dev/null || echo 0)
 say "resize 980 760"
 for _ in $(seq 1 240); do
-  NOW=$(grep -c 'PROBE resized=' "$LOG" 2>/dev/null || echo 0)
-  [ "$NOW" -gt "$RESIZE_LINES" ] && break
+  W=$(rail_field "$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')" win.w)
+  if [ -n "${W:-}" ] && [ "$W" != "$CUR_W" ]; then break; fi
   sleep 0.25
 done
 

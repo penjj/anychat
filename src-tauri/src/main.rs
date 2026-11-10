@@ -2638,24 +2638,23 @@ fn run_probe_command(h: tauri::AppHandle, cmd: String) {
                                 // previous size as if the request were refused.
                                 // The driver waits for this line before moving on,
                                 // so the extra time costs one step, not every step.
-                                // Compared in logical units. `inner_size` returns
-                                // physical pixels, so on a 2.5x display a request
-                                // for 660x700 reads back as 1640x1202 and never
-                                // matches a logical comparison -- which made this
-                                // wait spin for its whole budget and then report a
-                                // resize that had in fact succeeded.
+                                // Reported once, without waiting. This handler
+                                // runs on the main thread, so waiting here would
+                                // block the very event loop that performs the
+                                // resize: every read then returns the size from
+                                // before the call, no matter how long it waits.
+                                // That is why the report always looked one step
+                                // behind. The driver waits for the next report
+                                // instead, which arrives after the loop has had a
+                                // chance to act.
                                 let scale = w.scale_factor().unwrap_or(1.0);
-                                for _ in 0..300 {
-                                    let Ok(size) = w.inner_size() else { break };
-                                    let logical = size.to_logical::<f64>(scale);
-                                    got = format!("{:.0}x{:.0}", logical.width, logical.height);
-                                    if (logical.width - want.0).abs() <= 2.0
-                                        && (logical.height - want.1).abs() <= 2.0
-                                    {
-                                        break;
-                                    }
-                                    std::thread::sleep(std::time::Duration::from_millis(50));
-                                }
+                                let got = w
+                                    .inner_size()
+                                    .map(|size| {
+                                        let logical = size.to_logical::<f64>(scale);
+                                        format!("{:.0}x{:.0}", logical.width, logical.height)
+                                    })
+                                    .unwrap_or_else(|_| "?".into());
                                 let shown = w.is_visible().unwrap_or(false);
                                 println!(
                                     "PROBE resized={}x{} actual={got} visible={shown}",
