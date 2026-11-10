@@ -25,6 +25,16 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": [
+        "https://github.com/penjj/anychat/releases/latest/download/latest.json"
+      ],
+      "dialog": false
     }
   }
 }

@@ -98,6 +98,57 @@ scripts/
 
 字体由 `--font-display` 控制，`SplashAnimation.jsx` 与样式表共用这一个变量。`font-preview.html` 是选字体用的预览页，直接用浏览器打开，不参与构建。
 
+## 自动更新
+
+应用用 `tauri-plugin-updater` 检查新版本，更新源是 GitHub Release 里的 `latest.json`：
+
+```
+https://github.com/penjj/anychat/releases/latest/download/latest.json
+```
+
+设置面板里有当前版本号和「检查更新」按钮。发现新版本后可以下载安装，装完自动重启。
+
+### 首次配置签名密钥
+
+更新包必须签名，否则已安装的应用会拒绝安装。公钥编译进应用，私钥只存在 CI secrets 里。
+
+生成密钥对（**私钥只显示一次**，务必立刻备份）：
+
+```bash
+npx tauri signer generate -w ~/.tauri/anychat.key
+```
+
+命令会输出公钥，把它填进 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`，然后把私钥和密码存进仓库 secrets：
+
+| Secret | 内容 |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | 私钥文件全文（含 `untrusted comment:` 首行） |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 生成时设的密码 |
+
+```bash
+gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/anychat.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+```
+
+**私钥丢失的后果**：已安装的应用再也无法验证新版本，用户只能手动重新下载。请离线备份。
+
+### 发布流程
+
+推一个 tag 就会构建四个平台、合并各自的 `latest.json`、签名并发布：
+
+```bash
+git tag -a v0.2.0 -m "0.2.0"
+git push origin v0.2.0
+```
+
+四个平台的构建各自产出一份只含自身平台的 `latest.json`，`scripts/merge-updater-manifest.py` 把它们合并成一份，附在 Release 根目录。更新器读的就是这一份。
+
+本地验证合并逻辑：
+
+```bash
+python3 scripts/merge-updater-manifest.py <artifacts-dir> latest.json
+```
+
 ## 门禁
 
 ```bash

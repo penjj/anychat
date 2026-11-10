@@ -476,6 +476,60 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .select:hover { background: var(--hover); }
 .select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* Update row: version on the left of the button so the current build is always
+   visible, even when the endpoint cannot be reached. */
+.version-group { display: inline-flex; align-items: center; gap: 10px; }
+.version {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+.mini-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--elev);
+  color: var(--fg);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.mini-btn:hover:not(:disabled) { background: var(--hover); }
+.mini-btn:disabled { opacity: .55; }
+.mini-btn.primary { background: var(--accent); border-color: transparent; color: #fff; }
+.mini-btn.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+
+.update-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+/* Release notes come from the tag body and are untrusted text: keep them
+   contained instead of letting a long line stretch the card. */
+.update-notes {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+  white-space: pre-wrap;
+  max-height: 96px;
+  overflow-y: auto;
+}
+.bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
 /* Segmented control for the three theme choices. Three literal labels beat a
    cycling button: "auto" is not a state you can infer from the current
    appearance, so it has to be visible and selectable. */

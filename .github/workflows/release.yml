@@ -77,9 +77,19 @@ jobs:
       # shadows the MSVC linker, so a bash shell breaks the arm64 leg with
       # "extra operand". pwsh keeps the real linker first on PATH; the arm64
       # MSVC environment set up above is already in GITHUB_ENV either way.
+      # Updater signing. The private key never leaves the repository secrets;
+      # the public half is compiled in via tauri.conf.json.
+      #
+      # Signing is skipped when the secret is absent rather than failing the
+      # build: without it the updater artefacts are simply unsigned, and a
+      # release that people can install by hand is better than a red run. Set
+      # the secrets and the same command produces signed ones.
       - name: Build bundle
         run: npm run tauri build -- --target ${{ matrix.target }}
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # Tauri names its outputs per format, so collect whatever this platform
       # produced instead of guessing the extension.
@@ -90,8 +100,11 @@ jobs:
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.nsis.zip
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.nsis.zip.sig
 
   # Attaches every artefact to the tag's release. Runs after all legs so the
   # release appears complete rather than growing file by file.
@@ -107,7 +120,17 @@ jobs:
       - name: List artefacts
         run: find artifacts -type f | sort
 
+      # Tauri emits a latest.json per build, each describing only its own
+      # platform. The updater reads one document, so the four are merged into a
+      # single manifest keyed by target triple.
+      - name: Merge updater manifests
+        run: python3 scripts/merge-updater-manifest.py artifacts latest.json
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          # latest.json must sit at the release root: the updater endpoint is
+          # releases/latest/download/latest.json, which is a flat URL.
+          files: |
+            artifacts/**/*
+            latest.json
           fail_on_unmatched_files: false

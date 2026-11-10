@@ -281,6 +281,24 @@ export default function App () {
   })
   // The theme is authoritative in Rust; the pre-paint script in index.html only
   // has localStorage. Keep the two in step so a relaunch does not flash.
+  // The download happens in Rust; the page only renders the numbers. Progress
+  // arrives here because the command does not return until the whole file is
+  // in, which would leave the panel silent for the entire transfer.
+  useEffect(() => {
+    let unlisten = null
+    const bind = async () => {
+      try {
+        unlisten = await window.__TAURI__.event.listen('update-progress', (e) => {
+          const { downloaded, total } = e.payload || {}
+          if (!total) return
+          setUpdate((u) => ({ ...u, progress: Math.min(1, downloaded / total) }))
+        })
+      } catch (_) {}
+    }
+    bind()
+    return () => { if (unlisten) unlisten() }
+  }, [])
+
   useEffect(() => {
     if (!state.theme) return
     document.documentElement.setAttribute('data-theme', state.theme)
@@ -292,6 +310,10 @@ export default function App () {
   // Last rebinding failure, so the panel can name the keys that were refused
   // instead of only showing that something went wrong.
   const [shortcutError, setShortcutError] = useState('')
+  // { info, notes, busy, installing, progress }: `info` is the backend's answer,
+  // `notes` carries a transport failure that never became an answer, and
+  // `progress` is 0-1 while the payload downloads.
+  const [update, setUpdate] = useState({ info: null, notes: '', busy: false, installing: false, progress: 0 })
   const [liveUrl, setLiveUrl] = useState('')
   const [broken, setBroken] = useState(() => new Set())
   const [menu, setMenu] = useState(null)
@@ -363,7 +385,9 @@ export default function App () {
         winTitle: (() => {
           const t = document.querySelector('.win-title')
           const h = document.querySelector('.rail-head')
-          if (!t || !h) return null
+          // A hidden title has no box, and getBoundingClientRect reports zeros:
+          // reporting an offset then would be noise, not a measurement.
+          if (!t || !h || getComputedStyle(t).display === 'none') return null
           const tr = t.getBoundingClientRect()
           const hr = h.getBoundingClientRect()
           return {
@@ -375,7 +399,10 @@ export default function App () {
           const btn = document.getElementById('btn-new')
           if (!btn) return null
           const b = btn.getBoundingClientRect()
-          const kids = Array.from(btn.children).map((n) => n.getBoundingClientRect())
+          if (b.width === 0) return null
+          const kids = Array.from(btn.children)
+            .filter((n) => getComputedStyle(n).display !== 'none')
+            .map((n) => n.getBoundingClientRect())
           if (!kids.length) return null
           const left = Math.min(...kids.map((k) => k.left))
           const right = Math.max(...kids.map((k) => k.right))
@@ -971,6 +998,63 @@ export default function App () {
               ? `快捷键注册失败：${shortcutError || state.shortcut}被占用，已恢复原设置。可在托盘菜单召唤。`
               : `${prettyShortcut(state.shortcut)} 显隐窗口（不抢焦点）· ⌘N 新会话 · ⌘R 刷新 · ⌘Q 退出`}
           </div>
+          <div className="row">
+            <span>版本</span>
+            <span className="version-group">
+              <span className="version">v{state.version || '—'}</span>
+              <button
+                className="mini-btn"
+                disabled={update.busy}
+                onClick={async () => {
+                  setUpdate((u) => ({ ...u, busy: true, notes: '检查中…' }))
+                  try {
+                    const info = await invoke('check_update')
+                    setUpdate({ busy: false, info, progress: 0 })
+                  } catch (err) {
+                    setUpdate({ busy: false, info: null, notes: String(err), progress: 0 })
+                  }
+                }}
+              >
+                {update.busy ? '检查中…' : '检查更新'}
+              </button>
+            </span>
+          </div>
+          {(update.info?.available || update.notes) && (
+            <div className="update-box">
+              <div className="hint">
+                {update.info?.available
+                  ? `新版本 ${update.info.version} 可用（当前 ${update.info.current}）`
+                  : (update.info?.notes || update.notes)}
+              </div>
+              {update.info?.available && (
+                <>
+                  {update.info.notes && (
+                    <div className="update-notes">{update.info.notes}</div>
+                  )}
+                  {update.progress > 0 && update.progress < 1 && (
+                    <div className="bar"><i style={{ width: `${update.progress * 100}%` }} /></div>
+                  )}
+                  <div className="actions">
+                    <button
+                      className="mini-btn primary"
+                      disabled={update.installing}
+                      onClick={async () => {
+                        setUpdate((u) => ({ ...u, installing: true }))
+                        try {
+                          await invoke('install_update')
+                          // Unreachable in practice: the app restarts.
+                        } catch (err) {
+                          setUpdate((u) => ({ ...u, installing: false, notes: String(err) }))
+                        }
+                      }}
+                    >
+                      {update.installing ? '安装中…' : '下载并安装'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           <div className="actions">
             <button className="primary" onClick={closeSettings}>完成</button>
           </div>

@@ -116,7 +116,18 @@ BEFORE_RAIL=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
 BEFORE_SLOT=$(echo "$BEFORE_RAIL" | sed -n 's/.*"slot":{"w":\([0-9]*\),[^}]*}.*/\1/p')
 BEFORE_RAIL_W=$(echo "$BEFORE_RAIL" | sed -n 's/.*"railWidth":\([0-9]*\).*/\1/p')
 say "resize 1300 900"
-sleep 4
+# Wait for the rail to report the new geometry. A fixed sleep read the last
+# pre-resize line whenever the window took longer than it to settle, which made
+# this check fail with before and after both equal -- looking like the content
+# never moved when in fact it had not been measured yet.
+# Wait for the slot width to actually change, not merely for more log lines:
+# the rail reports repeatedly while settling, so a line count is satisfied by
+# an unchanged measurement and the check then compares 512 with 512.
+for _ in $(seq 1 80); do
+  W=$(grep '^RAIL ' "$LOG" | tail -1 | sed -n 's/.*"slot":{"w":\([0-9]*\).*/\1/p')
+  if [ -n "${W:-}" ] && [ "$W" != "$BEFORE_SLOT" ]; then break; fi
+  sleep 0.25
+done
 AFTER=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
 AFTER_SLOT=$(echo "$AFTER" | sed -n 's/.*"slot":{"w":\([0-9]*\),[^}]*}.*/\1/p')
 AFTER_RAIL_W=$(echo "$AFTER" | sed -n 's/.*"railWidth":\([0-9]*\).*/\1/p')

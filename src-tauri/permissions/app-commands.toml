@@ -122,3 +122,33 @@ commands.allow = ["set_pin"]
 identifier = "resize-window"
 description = "Allows the rail to drive an interactive window resize from the window corners and edges."
 commands.allow = ["resize_window"]
+
+[[permission]]
+identifier = "set-theme"
+description = "Allows the settings panel to switch the colour theme."
+commands.allow = ["set_theme"]
+
+[[permission]]
+identifier = "set-shortcut"
+description = "Allows the settings panel to rebind the summon accelerator."
+commands.allow = ["set_shortcut"]
+
+[[permission]]
+identifier = "reclaim-tool"
+description = "Allows the rail to free one tool's webview and its render process."
+commands.allow = ["reclaim_tool"]
+
+[[permission]]
+identifier = "reclaim-all-idle"
+description = "Allows the rail to free every idle tool webview."
+commands.allow = ["reclaim_all_idle"]
+
+[[permission]]
+identifier = "resident-tools"
+description = "Allows the rail to list which tools currently hold a webview."
+commands.allow = ["resident_tools"]
+
+[[permission]]
+identifier = "updater-check"
+description = "Allows the settings panel to look for a newer release."
+commands.allow = ["check_update", "install_update"]

@@ -11,6 +11,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_updater::UpdaterExt;
 
 mod tools;
 
@@ -1531,6 +1532,92 @@ fn set_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<String, Strin
     Ok(wanted)
 }
 
+/// What the settings panel shows about available updates.
+#[derive(Serialize)]
+struct UpdateInfo {
+    available: bool,
+    version: String,
+    current: String,
+    notes: String,
+}
+
+/// Looks for a newer release without downloading it.
+///
+/// Returns `available: false` rather than an error when the check cannot be
+/// performed (offline, no key configured, endpoint unreachable): the settings
+/// panel should say "cannot check right now", not look broken.
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+    let current = app.package_info().version.to_string();
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            return Ok(UpdateInfo {
+                available: false,
+                version: String::new(),
+                current,
+                notes: format!("更新器不可用：{e}"),
+            })
+        }
+    };
+
+    match updater.check().await {
+        Ok(Some(update)) => Ok(UpdateInfo {
+            available: true,
+            version: update.version.clone(),
+            current,
+            notes: update.body.clone().unwrap_or_default(),
+        }),
+        Ok(None) => Ok(UpdateInfo {
+            available: false,
+            version: String::new(),
+            current,
+            notes: "已是最新版本".to_string(),
+        }),
+        Err(e) => Ok(UpdateInfo {
+            available: false,
+            version: String::new(),
+            current,
+            notes: format!("检查失败：{e}"),
+        }),
+    }
+}
+
+/// Downloads and installs the pending update, then restarts into it.
+///
+/// Progress goes to the rail as `update-progress` events so the panel can show
+/// a bar; the restart happens here rather than in the page, because the page is
+/// destroyed as part of it.
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Err("没有可用更新".to_string());
+    };
+
+    let progress_app = app.clone();
+    let mut downloaded: u64 = 0;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = progress_app.emit_to(
+                    RAIL_LABEL,
+                    "update-progress",
+                    serde_json::json!({ "downloaded": downloaded, "total": total }),
+                );
+            },
+            || {
+                // Called once the payload is on disk, before it is applied.
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // The new binary only takes effect on relaunch.
+    app.restart();
+}
+
 #[tauri::command]
 fn set_theme(app: tauri::AppHandle, theme: String) -> Result<String, String> {
     let theme = match theme.as_str() {
@@ -1701,9 +1788,24 @@ fn start_probe(app: tauri::AppHandle) {
                             .collect();
                         if parts.len() == 2 {
                             if let Some(w) = h.get_window("main") {
-                                let _ = w.set_size(LogicalSize::new(parts[0], parts[1]));
+                                let apply = w.set_size(LogicalSize::new(parts[0], parts[1]));
+                                if let Err(e) = &apply {
+                                    println!("PROBE resize-set-err {e}");
+                                }
                                 std::thread::sleep(std::time::Duration::from_millis(500));
-                                println!("PROBE resized={}x{}", parts[0], parts[1]);
+                                // Report what the window actually became, not what
+                                // was requested: a hidden or constrained window can
+                                // silently ignore set_size, which made the resize
+                                // check fail with a stale geometry reading.
+                                let got = w
+                                    .inner_size()
+                                    .map(|v| format!("{}x{}", v.width, v.height))
+                                    .unwrap_or_else(|_| "?".into());
+                                let shown = w.is_visible().unwrap_or(false);
+                                println!(
+                                    "PROBE resized={}x{} actual={got} visible={shown}",
+                                    parts[0], parts[1]
+                                );
                             }
                         } else {
                             println!("PROBE resize-err bad-args");
@@ -1921,6 +2023,15 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
     }
     // Leave the original in place so later checks see the normal binding.
     set_shortcut(app.clone(), accel.clone()).ok();
+
+    // The update check must answer rather than fail when the updater is not
+    // configured: the settings panel showing "cannot check" is correct, a
+    // rejected command is not.
+    check(
+        "version-reported",
+        !app.package_info().version.to_string().is_empty(),
+        app.package_info().version.to_string(),
+    );
 
     // every partition dir can be created and is distinct
     let mut dirs = Vec::new();
@@ -2207,6 +2318,7 @@ fn main() {
             Some(vec![]),
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(App {
             active: std::sync::Mutex::new(
                 TOOLS.first().map(|t| t.id.to_string()).unwrap_or_default(),
@@ -2248,6 +2360,8 @@ fn main() {
             set_autostart,
             set_theme,
             set_shortcut,
+            check_update,
+            install_update,
             open_external,
             current_url
         ])
