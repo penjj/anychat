@@ -765,7 +765,7 @@ mod win_env {
         unsafe {
             let p = addr as *const webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
             let raw: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment = &*p;
-            raw.clone()
+            Some(raw.clone())
         }
     }
 }
