@@ -125,11 +125,49 @@ jobs:
       - name: List artefacts
         run: find artifacts -type f | sort
 
-      # Tauri emits a latest.json per build, each describing only its own
-      # platform. The updater reads one document, so the four are merged into a
-      # single manifest keyed by target triple.
-      - name: Merge updater manifests
-        run: python3 scripts/merge-updater-manifest.py artifacts latest.json
+      # The bundle file names are identical on both macOS legs (and on both
+      # Windows legs), so uploading them flat would overwrite one with the
+      # other. Rename to include the target before anything is published.
+      #
+      # VERSION comes from tauri.conf.json rather than the tag: the tag names
+      # the release, the config names the build, and the updater compares
+      # against the latter. A mismatch would look like an available update
+      # forever.
+      - name: Rename payloads per target
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          for leg_dir in artifacts/*/; do
+            leg=$(basename "$leg_dir")
+            case "$leg" in
+              *mac-arm64) TARGET=darwin-aarch64 ;;
+              *mac-x64)   TARGET=darwin-x86_64 ;;
+              *win-x64)   TARGET=windows-x86_64 ;;
+              *win-arm64) TARGET=windows-aarch64 ;;
+              *) continue ;;
+            esac
+            for f in "$leg_dir"macos/*.app.tar.gz "$leg_dir"nsis/*.nsis.zip; do
+              [ -e "$f" ] || continue
+              case "$f" in
+                *.app.tar.gz) SUFFIX=app.tar.gz ;;
+                *.nsis.zip)   SUFFIX=nsis.zip ;;
+              esac
+              base="${f%%.*}"
+              dir=$(dirname "$f")
+              # Rename the payload and its signature together, so the pair
+              # stays adjacent for the manifest step.
+              mv "$f" "$dir/AnyChat_${VERSION}_${TARGET}.${SUFFIX}"
+              [ -e "$f.sig" ] && mv "$f.sig" "$dir/AnyChat_${VERSION}_${TARGET}.${SUFFIX}.sig"
+            done
+          done
+          find artifacts -name 'AnyChat_*' -type f | sort
+
+      # Tauri signs each payload but writes no manifest, so the document the
+      # updater reads is assembled from what the bundler actually left behind.
+      - name: Build updater manifest
+        run: python3 scripts/build-updater-manifest.py artifacts . "$VERSION" "${GITHUB_REF_NAME}"
 
       # Mirrored copies, one per proxy, whose platform URLs point at that
       # proxy. Paired with the endpoint list in the app: a network that cannot

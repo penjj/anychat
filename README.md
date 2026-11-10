@@ -161,15 +161,18 @@ git tag -a v0.2.0 -m "0.2.0"
 git push origin v0.2.0
 ```
 
-四个平台的构建各自产出一份只含自身平台的 `latest.json`，`scripts/merge-updater-manifest.py` 把它们合并成一份，附在 Release 根目录。更新器读的就是这一份。
-
-`scripts/mirror-manifest.py` 再据此产出 `latest-mirror1.json`、`latest-mirror2.json`，每份的平台下载地址指向对应反代。两个脚本都由 `release.yml` 自动执行。
-
-本地验证合并逻辑：
+Tauri 只签名更新包（产出 `.sig`），**不生成** `latest.json`——这一点很容易误判，曾经导致每次发布到最后一步才发现没有 manifest。所以由 `scripts/build-updater-manifest.py` 从实际产物组装：
 
 ```bash
-python3 scripts/merge-updater-manifest.py <artifacts-dir> latest.json
+python3 scripts/build-updater-manifest.py <artifacts-dir> <out-dir> <version> <tag>
 ```
+
+两个注意点：
+
+- **文件名会冲突**。两个 macOS 平台都产出 `AnyChat.app.tar.gz`，两个 Windows 平台都产出同名的 NSIS 包。直接平铺上传会互相覆盖，所以 `release.yml` 先按目标改名为 `AnyChat_<version>_<target>.<格式>`，manifest 里的 URL 也指向改名后的文件。
+- **版本号取自 `tauri.conf.json`，不是 tag**。tag 只是给 Release 起名，更新器比较的是配置里的版本。
+
+`scripts/mirror-manifest.py` 再据此产出 `latest-mirror1.json`、`latest-mirror2.json`，每份的平台下载地址指向对应反代。两个脚本都由 `release.yml` 自动执行。
 
 ## 门禁
 
