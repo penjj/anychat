@@ -3352,17 +3352,18 @@ fn main() {
 
             let rail = WebviewBuilder::new(RAIL_LABEL, WebviewUrl::App("index.html".into()))
                 .initialization_script("window.__ANYCHAT__ = { hidden: true };");
-            let rail = window.add_child(
+            window.add_child(
                 rail,
                 LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(980.0, 760.0),
             )?;
-            // The rail is the first webview in the process, so it creates the
-            // WebView2 environment every later one has to join. See the Windows
-            // note on `win_env`: a second environment over the same user-data
-            // directory fails with ERROR_BUSY, which is the white screen.
-            #[cfg(windows)]
-            remember_environment(&rail);
+            // Deliberately not registered as the shared environment. An
+            // environment is bound to the user-data directory it was created
+            // over, and the rail keeps Tauri's default while content views use
+            // `profile/`. Handing the rail's environment to a content view makes
+            // WebView2 reject the mismatch with ERROR_BUSY -- the same code as
+            // the directory collision, which is why it looked like the fix had
+            // not applied. The tools share among themselves instead.
 
             apply_rail_width(&handle, rail_width(&handle));
             // Icons are I/O; start them only after the window and rail exist.

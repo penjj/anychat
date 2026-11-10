@@ -31,7 +31,7 @@ APP=$!
 # wedged process on Windows can make even `wait` never return, and a gate that
 # hangs is worse than one that fails: it burns the job's whole budget and
 # reports nothing. The watchdog turns that into a normal failure with output.
-( sleep "${PROBE_DEADLINE:-600}"; echo "PROBE deadline reached" >> "$LOG"; kill -9 "$APP" 2>/dev/null ) &
+( sleep "${PROBE_DEADLINE:-600}"; echo "PROBE deadline reached" >> "$LOG"; kill -9 "$APP" 2>/dev/null ) >/dev/null 2>&1 &
 WATCHDOG=$!
 
 
