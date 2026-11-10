@@ -167,10 +167,11 @@ Tauri 只签名更新包（产出 `.sig`），**不生成** `latest.json`——�
 python3 scripts/build-updater-manifest.py <artifacts-dir> <out-dir> <version> <tag>
 ```
 
-两个注意点：
+三个注意点：
 
 - **文件名会冲突**。两个 macOS 平台都产出 `AnyChat.app.tar.gz`，两个 Windows 平台都产出同名的 NSIS 包。直接平铺上传会互相覆盖，所以 `release.yml` 先按目标改名为 `AnyChat_<version>_<target>.<格式>`，manifest 里的 URL 也指向改名后的文件。
 - **版本号取自 `tauri.conf.json`，不是 tag**。tag 只是给 Release 起名，更新器比较的是配置里的版本。
+- **Windows 的签名在裸安装包旁边**，不在 zip 里。`createUpdaterArtifacts: true` 时 bundler 产出 `-setup.exe.sig` 和 `_en-US.msi.sig`；只有切到 `v1Compatible` 模式才会额外包一层 `.exe.zip` 并签它。上传路径必须显式列出这些 `.sig`，漏掉的话 Windows 端永远收不到更新，而 Release 看起来是完整的。
 
 `scripts/mirror-manifest.py` 再据此产出 `latest-mirror1.json`、`latest-mirror2.json`，每份的平台下载地址指向对应反代。两个脚本都由 `release.yml` 自动执行。
 
