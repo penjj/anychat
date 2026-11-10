@@ -126,11 +126,21 @@ jobs:
       - name: Merge updater manifests
         run: python3 scripts/merge-updater-manifest.py artifacts latest.json
 
+      # Mirrored copies, one per proxy, whose platform URLs point at that
+      # proxy. Paired with the endpoint list in the app: a network that cannot
+      # reach GitHub fetches latest-mirrorN.json through proxy N and then the
+      # payload through the same one. The signature covers the payload, not the
+      # URL, so a rewritten host still verifies.
+      - name: Emit mirrored manifests
+        run: python3 scripts/mirror-manifest.py latest.json .
+
       - uses: softprops/action-gh-release@v2
         with:
           # latest.json must sit at the release root: the updater endpoint is
-          # releases/latest/download/latest.json, which is a flat URL.
+          # releases/latest/download/latest.json, which is a flat URL. The
+          # mirrors sit beside it for the same reason.
           files: |
             artifacts/**/*
             latest.json
+            latest-mirror*.json
           fail_on_unmatched_files: false

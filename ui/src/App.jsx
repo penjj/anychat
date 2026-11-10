@@ -490,6 +490,14 @@ export default function App () {
     reportBounds()
   }, [railWidth, reportBounds])
 
+  // The update banner is a flow element between the toolbar and the page, so it
+  // moves the slot without resizing #main. The observer above therefore stays
+  // quiet while the native webview still sits at the old offset and covers the
+  // banner. Reposition explicitly whenever it appears or disappears.
+  useEffect(() => {
+    reportBounds()
+  }, [state.update_ready, reportBounds])
+
   // Report after paint so the gate reads settled geometry, not a mid-transition
   // snapshot. The extra timeout covers the CSS width transition.
   useEffect(() => {
@@ -915,6 +923,43 @@ export default function App () {
               </button>
             </span>
           </header>
+          {/* Sits between the toolbar and the page, so it never covers the
+              content and never floats over the controls. Present only when a
+              version is waiting, which is what keeps it from being furniture. */}
+          {state.update_ready && (
+            <div id="update-bar" className={cl('bar-row', state.update_ready.downloaded && 'ready')}>
+              <span className="ub-text">
+                {state.update_ready.downloaded
+                  ? `v${state.update_ready.version} 已下载，重启即可生效`
+                  : `正在下载 v${state.update_ready.version}…`}
+              </span>
+              <span className="ub-spacer" />
+              <button
+                className="ub-btn"
+                disabled={!state.update_ready.downloaded || update.installing}
+                onClick={async () => {
+                  setUpdate((u) => ({ ...u, installing: true }))
+                  try {
+                    await invoke('install_update')
+                  } catch (err) {
+                    // The app relaunches on success, so reaching here means
+                    // nothing was applied. Say so and let the banner retry.
+                    setUpdate((u) => ({ ...u, installing: false, notes: String(err) }))
+                  }
+                }}
+              >
+                {update.installing ? '重启中…' : '重启更新'}
+              </button>
+              <button
+                className="ub-dismiss"
+                title="以后再说"
+                aria-label="以后再说"
+                onClick={() => setState((p) => ({ ...p, update_ready: null }))}
+              >
+                <Icon id="close" />
+              </button>
+            </div>
+          )}
           <div id="stage"><div id="slot" ref={slotRef} /></div>
           <div id="progress" />
         </main>
@@ -1027,6 +1072,24 @@ export default function App () {
               ? `快捷键注册失败：${shortcutError || state.shortcut}被占用，已恢复原设置。可在托盘菜单召唤。`
               : `${prettyShortcut(state.shortcut)} 显隐窗口（不抢焦点）· ⌘N 新会话 · ⌘R 刷新 · ⌘Q 退出`}
           </div>
+          <label className="row">
+            <span>自动检查更新</span>
+            <input
+              type="checkbox"
+              checked={Boolean(state.auto_check_update)}
+              onChange={async (e) => {
+                const want = e.target.checked
+                try {
+                  const actual = await invoke('set_auto_check_update', { enabled: want })
+                  setState((p) => ({ ...p, auto_check_update: Boolean(actual) }))
+                } catch {
+                  // Nothing saved means nothing changed; show the real value
+                  // rather than a tick that does not describe the next launch.
+                  setState((p) => ({ ...p, auto_check_update: !want }))
+                }
+              }}
+            />
+          </label>
           <div className="row">
             <span>版本</span>
             <span className="version-group">

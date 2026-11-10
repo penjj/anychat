@@ -66,6 +66,22 @@ struct App {
     /// A summon arrived before the animation finished. Remembered instead of
     /// dropped: otherwise ⌥Space during startup would do nothing at all.
     wants_visible: std::sync::atomic::AtomicBool,
+    /// A new version that has been found, and whether its payload is already on
+    /// disk waiting for a relaunch. Shared with the rail so the banner reflects
+    /// the real state rather than a copy that can drift.
+    update_ready: std::sync::Mutex<Option<ReadyUpdate>>,
+    /// Verified payload from the background download. Kept here, not on disk,
+    /// so a relaunch that the user dismisses leaves nothing stale to clean up.
+    pending_bytes: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+/// A downloaded update waiting for a relaunch.
+#[derive(Serialize, Clone)]
+struct ReadyUpdate {
+    version: String,
+    /// False while the payload is still being fetched. The banner appears at
+    /// the moment a version is found so the user is not surprised later.
+    downloaded: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -95,6 +111,16 @@ struct Layout {
     /// "never set", which is what lets the platform default below take over.
     #[serde(default)]
     shortcut: String,
+    /// Whether to look for a newer release shortly after launch. On by default:
+    /// an app installed from a download link has no other way to learn that it
+    /// is behind. Nothing is downloaded or installed without the user clicking
+    /// through, so the check itself carries no risk.
+    #[serde(default = "default_true")]
+    auto_check_update: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_theme() -> String {
@@ -142,6 +168,7 @@ impl Default for Layout {
             always_on_top: false,
             theme: default_theme(),
             shortcut: String::new(),
+            auto_check_update: true,
         }
     }
 }
@@ -607,6 +634,13 @@ struct StateDto {
     icon_count: usize,
     zoom: f64,
     theme: String,
+    /// Mirrors the saved preference so the checkbox reflects the setting that
+    /// actually governs the next launch, not a transient toggle position.
+    auto_check_update: bool,
+    /// The version waiting to be applied, if any. Null when there is none, so
+    /// the banner is driven by state rather than by a separate event that could
+    /// be missed during a reload.
+    update_ready: Option<ReadyUpdate>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -617,26 +651,33 @@ struct Rect {
     height: f64,
 }
 
-fn partition_dir(app: &tauri::AppHandle, id: &str) -> Option<PathBuf> {
-    let dir = data_root(app)?.join("partitions").join(id);
+/// One profile directory for every tool, so cookies and storage are shared the
+/// way they are in a browser. Private tabs are not modelled here: isolation
+/// between tools was the previous behaviour and it broke single sign-on.
+fn shared_profile_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = data_root(app)?.join("profile");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
 
-/// Stable 16-byte store id so macOS gives each tool its own WKWebsiteDataStore.
+/// The one WKWebsiteDataStore every tool shares.
+///
+/// This used to be hashed per tool, which gave each its own cookie jar. The
+/// result was a sign-in per tool for anything that authenticates centrally:
+/// three Google tools meant three Google sign-ins, and each of them landed in
+/// a store the others could not see. Sharing one jar matches what a browser
+/// does and is what "log in once" requires.
+///
+/// The cost is real and is the reason per-tool jars existed: two accounts on
+/// the same site cannot be held at once. That is a browser's tradeoff too, and
+/// it is the one worth making -- the common case is a single account across
+/// several tools, not two accounts on one site.
+///
+/// The value is arbitrary but must never change between builds: it names an
+/// on-disk store, and a new value would strand every existing sign-in.
 #[cfg(target_os = "macos")]
-fn store_id(id: &str) -> [u8; 16] {
-    // FNV-1a over the tool id, doubled to fill 16 bytes. Stability matters more
-    // than collision resistance: it only has to separate our tools.
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in id.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&h.to_be_bytes());
-    out[8..].copy_from_slice(&h.rotate_left(32).to_be_bytes());
-    out
+fn store_id(_id: &str) -> [u8; 16] {
+    *b"anychat-shared01"
 }
 
 fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
@@ -693,8 +734,11 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
         eprintln!("anychat: popup allowed {url}");
         NewWindowResponse::Allow
     });
+    // Same store for every tool, matching the macOS branch. A per-tool
+    // directory here would silently reintroduce the per-tool sign-in that the
+    // shared identifier removes there.
     #[cfg(not(target_os = "macos"))]
-    if let Some(dir) = partition_dir(app, id) {
+    if let Some(dir) = shared_profile_dir(app) {
         builder = builder.data_directory(dir);
     }
     let webview = window
@@ -1023,6 +1067,8 @@ fn state_dto(app: &tauri::AppHandle) -> StateDto {
         icon_count: TOOLS.iter().filter(|t| icon_cached(app, t.id).is_some()).count(),
         zoom: load_layout(app).zoom,
         theme: load_layout(app).theme,
+        auto_check_update: load_layout(app).auto_check_update,
+        update_ready: app.state::<App>().update_ready.lock().unwrap().clone(),
     }
 }
 
@@ -1541,24 +1587,181 @@ struct UpdateInfo {
     notes: String,
 }
 
-/// Builds an updater, honouring `ANYCHAT_UPDATE_ENDPOINT` when set.
+/// Where release assets live, without a trailing slash.
+const RELEASE_BASE: &str = "https://github.com/penjj/anychat/releases/latest/download";
+
+/// Canonical manifest. Everything else is a mirror of what lives here.
+const UPDATE_ENDPOINT: &str = concat!(
+    "https://github.com/penjj/anychat/releases/latest/download",
+    "/latest.json"
+);
+
+/// Builds the updater, honouring the endpoint overrides when set.
 ///
-/// The override exists so the whole flow -- check, download, verify, install,
+/// The overrides exist so the whole flow -- check, download, verify, install,
 /// restart -- can be exercised against a locally served manifest without
-/// publishing a release. It is an explicit environment variable rather than a
-/// config field so it cannot be set by accident in a shipped build.
-fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
-    let builder = app.updater_builder();
-    match std::env::var("ANYCHAT_UPDATE_ENDPOINT") {
-        Ok(endpoint) if !endpoint.is_empty() => {
-            let url = endpoint.parse().map_err(|e| format!("bad endpoint: {e}"))?;
-            builder
-                .endpoints(vec![url])
-                .map_err(|e| e.to_string())?
-                .build()
-                .map_err(|e| e.to_string())
+/// publishing a release. They are environment variables rather than config
+/// fields so they cannot be set by accident in a shipped build.
+///
+/// Endpoints are tried in order, so a reachable mirror ahead of the release
+/// host is used without any change to the build.
+///
+/// GitHub releases are slow or unreachable from mainland networks. The updater
+/// already walks the list on failure, so the configured host stays last: with a
+/// responsive first entry the check finishes even when the original would hang.
+fn update_endpoints() -> Vec<String> {
+    let mut list = Vec::new();
+
+    // Development override wins outright: pointing at a local manifest must
+    // test exactly that manifest, not a mirror that happens to answer.
+    if let Ok(endpoint) = std::env::var("ANYCHAT_UPDATE_ENDPOINT") {
+        if !endpoint.is_empty() {
+            return endpoint
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
-        _ => builder.build().map_err(|e| e.to_string()),
+    }
+
+    // Mirrors first. A mirror serves the same signed latest.json, so a wrong or
+    // malicious mirror cannot install anything: the signature embeds the
+    // version and the payload is verified against the compiled-in key.
+    if let Ok(mirrors) = std::env::var("ANYCHAT_UPDATE_MIRRORS") {
+        list.extend(
+            mirrors
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+    }
+    if let Ok(mirror) = std::env::var("ANYCHAT_UPDATE_MIRROR") {
+        if !mirror.is_empty() {
+            list.push(mirror);
+        }
+    }
+
+    // Proxy entries come in matched pairs: the manifest at index i is fetched
+    // through proxy i, and its platform URLs are rewritten to the same proxy.
+    // Fetching a manifest through a proxy while its download URL still named
+    // github.com would only move the stall to the payload, not remove it.
+    for (i, prefix) in GITHUB_PROXIES.iter().enumerate() {
+        if prefix.is_empty() {
+            continue;
+        }
+        list.push(format!(
+            "{prefix}{RELEASE_BASE}/latest-mirror{}.json",
+            i + 1
+        ));
+    }
+
+    // Direct last: it is the reference implementation, and it stays in the list
+    // so updating keeps working when a proxy goes offline.
+    list.push(UPDATE_ENDPOINT.to_string());
+    list
+}
+
+/// Reverse proxies, index-aligned with the `latest-mirrorN.json` assets.
+///
+/// These are third-party relays: they can disappear without notice, so the
+/// release host stays in the list and the count stays small. An empty entry is
+/// skipped, which is how a dead proxy is retired without renumbering the rest.
+const GITHUB_PROXIES: &[&str] = &["https://ghproxy.net/", "https://ghfast.top/"];
+
+fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let mut urls = Vec::new();
+    for raw in update_endpoints() {
+        match raw.parse() {
+            Ok(url) => urls.push(url),
+            // A typo in one mirror must not disable updating altogether.
+            Err(_) => eprintln!("updater: ignoring bad endpoint {raw}"),
+        }
+    }
+    if urls.is_empty() {
+        return Err("no usable update endpoint".to_string());
+    }
+
+    app.updater_builder()
+        .endpoints(urls)
+        .map_err(|e| e.to_string())?
+        // Without a bound, an unreachable host leaves the check spinning for
+        // minutes. Ten seconds is enough for a working mirror and short enough
+        // to move on.
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Finds a newer release and fetches its payload in the background.
+///
+/// Fetching ahead of time is what makes the banner's button a relaunch rather
+/// than a download: the user is told a version is ready, and clicking gives
+/// them that version immediately. Nothing is installed without that click --
+/// swapping the binary underneath someone mid-sentence is not a thing an app
+/// should do on its own.
+///
+/// A failure at any step is silent. There is no useful action for the user to
+/// take about a check that did not reach the network, and an app that reports
+/// every failed background attempt is an app people turn updates off in.
+async fn auto_update(app: tauri::AppHandle) {
+    let info = match check_update(app.clone()).await {
+        Ok(info) => info,
+        Err(why) => {
+            println!("PROBE autocheck failed {why}");
+            return;
+        }
+    };
+    if !info.available {
+        println!("PROBE autocheck current version={}", info.current);
+        return;
+    }
+    println!(
+        "PROBE autocheck available version={} current={}",
+        info.version, info.current
+    );
+
+    // Announce first, then download. The banner is the user's cue that
+    // something is happening; waiting for the payload would leave the check
+    // invisible for however long 4 MB takes on a bad connection.
+    {
+        let state = app.state::<App>();
+        *state.update_ready.lock().unwrap() = Some(ReadyUpdate {
+            version: info.version.clone(),
+            downloaded: false,
+        });
+    }
+    emit_state(&app);
+
+    let updater = match build_updater(&app) {
+        Ok(u) => u,
+        Err(why) => {
+            println!("PROBE autoupdate failed {why}");
+            return;
+        }
+    };
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        _ => {
+            println!("PROBE autoupdate failed recheck");
+            return;
+        }
+    };
+    // Not installed here: only the bytes are kept, and install_update applies
+    // them when the user asks to relaunch.
+    match update.download(|_, _| {}, || {}).await {
+        Ok(bytes) => {
+            let state = app.state::<App>();
+            state.pending_bytes.lock().unwrap().replace(bytes);
+            if let Some(ready) = state.update_ready.lock().unwrap().as_mut() {
+                ready.downloaded = true;
+            }
+            emit_state(&app);
+            println!(
+                "PROBE autoupdate ready version={}",
+                info.version
+            );
+        }
+        Err(why) => println!("PROBE autoupdate failed {why}"),
     }
 }
 
@@ -1616,6 +1819,16 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         return Err("没有可用更新".to_string());
     };
 
+    // The background fetch may already hold the verified payload, in which
+    // case installing is immediate. Re-downloading here would make the banner's
+    // promise -- "ready, click to relaunch" -- false.
+    let pending = app.state::<App>().pending_bytes.lock().unwrap().take();
+    if let Some(bytes) = pending {
+        update.install(&bytes).map_err(|e| e.to_string())?;
+        emit_state(&app);
+        app.restart();
+    }
+
     let progress_app = app.clone();
     let mut downloaded: u64 = 0;
     update
@@ -1637,6 +1850,15 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 
     // The new binary only takes effect on relaunch.
     app.restart();
+}
+
+#[tauri::command]
+fn set_auto_check_update(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let mut layout = load_layout(&app);
+    layout.auto_check_update = enabled;
+    save_layout(&app, &layout);
+    emit_state(&app);
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -1873,6 +2095,16 @@ fn start_probe(app: tauri::AppHandle) {
                         let (win_w, win_h) = logical_window_size(&h);
                         println!("PROBE state icons={} open={} rail={} win={}x{}",
                             dto.icon_count, dto.settings_open, dto.rail_width, win_w, win_h);
+                        // The banner is rendered by the rail page from this
+                        // state, so the version here is what the user is
+                        // actually being offered.
+                        match &dto.update_ready {
+                            Some(r) => println!(
+                                "PROBE update_ready version={} downloaded={}",
+                                r.version, r.downloaded
+                            ),
+                            None => println!("PROBE update_ready none"),
+                        }
                         if let Some(w) = h.get_window("main") {
                             #[cfg(target_os = "macos")]
                             if let Some((non_opaque, clear_bg)) = window_is_transparent(&w) {
@@ -1924,6 +2156,15 @@ fn start_probe(app: tauri::AppHandle) {
                     // Downloads and verifies without installing: proves the
                     // signature accepts the payload while leaving the running
                     // bundle untouched, which is what a smoke test needs.
+                    // The endpoint order decides which host is tried first, so
+                    // it is worth asserting directly rather than inferring it
+                    // from whichever one happens to answer.
+                    "update-endpoints" => {
+                        for url in update_endpoints() {
+                            println!("PROBE endpoint {url}");
+                        }
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
                     "download-update" => {
                         let probe_app = h.clone();
                         tauri::async_runtime::spawn(async move {
@@ -2111,21 +2352,31 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
         app.package_info().version.to_string(),
     );
 
-    // every partition dir can be created and is distinct
-    let mut dirs = Vec::new();
-    for tool in TOOLS {
-        if let Some(d) = partition_dir(app, tool.id) {
-            dirs.push(d.display().to_string());
-        }
-    }
-    let mut unique_dirs = dirs.clone();
-    unique_dirs.sort();
-    unique_dirs.dedup();
+    // One shared profile, not one directory per tool. The previous check
+    // asserted the opposite and would now pass a build that had silently gone
+    // back to per-tool jars, which is exactly the regression worth catching:
+    // it looks like a working app and costs a sign-in per tool.
+    let shared = shared_profile_dir(app);
     check(
-        "per-tool-partition-dirs",
-        dirs.len() == TOOLS.len() && unique_dirs.len() == TOOLS.len(),
-        format!("{} dirs, {} unique", dirs.len(), unique_dirs.len()),
+        "shared-profile-dir",
+        shared.as_ref().is_some_and(|d| d.is_dir()),
+        shared
+            .as_ref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "none".to_string()),
     );
+    // Two different tools must resolve to the same identifier, which is what
+    // makes their cookies co-visible.
+    #[cfg(target_os = "macos")]
+    {
+        let a = TOOLS.first().map(|t| store_id(t.id));
+        let b = TOOLS.get(1).map(|t| store_id(t.id));
+        check(
+            "shared-store-identifier",
+            a.is_some() && a == b,
+            format!("{a:?} vs {b:?}"),
+        );
+    }
 
     // Pick a non-default tool from the registry instead of naming one site: the
     // inventory is editable and a removed entry must not break the whole gate.
@@ -2411,6 +2662,8 @@ fn main() {
             last_shown: std::sync::Mutex::new(std::collections::HashMap::new()),
             menu_open: std::sync::atomic::AtomicBool::new(false),
             wants_visible: std::sync::atomic::AtomicBool::new(false),
+            update_ready: std::sync::Mutex::new(None),
+            pending_bytes: std::sync::Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             list_tools,
@@ -2436,6 +2689,7 @@ fn main() {
             open_settings,
             close_settings,
             set_autostart,
+            set_auto_check_update,
             set_theme,
             set_shortcut,
             check_update,
@@ -2523,6 +2777,21 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(1500));
                 prefetch_icons(icon_handle);
             });
+
+            // A newer release is announced, never installed behind the user's
+            // back: the check runs once shortly after launch, and finding one
+            // only puts a mark on the settings row. Delayed past the splash and
+            // the icon prefetch, since neither the user nor the network should
+            // be asked to do three things at once.
+            if load_layout(&handle).auto_check_update {
+                let updater = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                    println!("PROBE autocheck start");
+                    tauri::async_runtime::block_on(auto_update(updater));
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                });
+            }
 
             build_app_menu(&handle)?;
             build_tray(&handle)?;

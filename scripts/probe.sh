@@ -257,5 +257,42 @@ fi
 ICONS=$(echo "$LINE" | sed -n 's/.*icons=\([0-9]*\).*/\1/p')
 [ -n "${ICONS:-}" ] && [ "$ICONS" -ge 1 ]; ok "favicons-cached" $? "icons=$ICONS"
 
+# The endpoint order is what makes updating work on a hostile network: a
+# reachable proxy must be consulted before the host it fronts. Asserting the
+# order catches a misplaced entry that would otherwise only show up as a hang
+# for users who cannot reach github.com.
+say "update-endpoints"
+if wait_for 'PROBE endpoint ' 10; then
+  EPS=$(grep '^PROBE endpoint ' "$LOG" | sed 's/^PROBE endpoint //')
+  FIRST=$(echo "$EPS" | head -1)
+  LAST=$(echo "$EPS" | tail -1)
+  COUNT=$(echo "$EPS" | wc -l | tr -d ' ')
+  case "$FIRST" in
+    https://*) MIRROR_FIRST=0 ;;
+    *) MIRROR_FIRST=1 ;;
+  esac
+  case "$LAST" in
+    https://github.com/*) DIRECT_LAST=0 ;;
+    *) DIRECT_LAST=1 ;;
+  esac
+  if [ "$COUNT" -ge 2 ] && [ "$MIRROR_FIRST" -eq 0 ] && [ "$DIRECT_LAST" -eq 0 ] \
+     && [ "$FIRST" != "$LAST" ]; then
+    ok "update-endpoints-mirror-before-direct" 0 "n=$COUNT last=$LAST"
+  else
+    ok "update-endpoints-mirror-before-direct" 1 "n=$COUNT first=$FIRST last=$LAST"
+  fi
+else
+  ok "update-endpoints-mirror-before-direct" 1 "no endpoint lines"
+fi
+
+# A launch-time check is the only way an installed build learns it is behind.
+# It is announced by the probe line, so its absence means the feature is off
+# rather than merely quiet.
+if grep -q '^PROBE autocheck ' "$LOG"; then
+  ok "update-autocheck-runs-on-launch" 0 "$(grep '^PROBE autocheck ' "$LOG" | tail -1)"
+else
+  ok "update-autocheck-runs-on-launch" 1 "no autocheck line"
+fi
+
 echo "RESULT $([ $FAIL -eq 0 ] && echo ok || echo "FAILED $FAIL")"
 [ $FAIL -eq 0 ]
