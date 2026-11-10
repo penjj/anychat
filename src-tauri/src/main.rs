@@ -2632,11 +2632,10 @@ fn run_probe_command(h: tauri::AppHandle, cmd: String) {
                                 // compare two identical, stale numbers.
                                 let want = (parts[0], parts[1]);
                                 let mut got = String::new();
-                                // Ten seconds, not two. On a hosted runner the
-                                // window server takes seconds to apply a resize,
-                                // and a short bound reports the previous size as
-                                // if the request had been refused.
-                                for _ in 0..200 {
+                                // Two seconds. Longer only delays every later
+                                // command, and the report below carries enough
+                                // to see whether the resize was applied or not.
+                                for _ in 0..40 {
                                     let now = w.inner_size().ok();
                                     let hit = now
                                         .map(|v| {

@@ -249,13 +249,16 @@ for _ in $(seq 1 80); do
 done
 AFTER=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
 AFTER_SLOT=$(rail_field "$AFTER" slot.w)
+# What the app said it did with the resize, so a failure says whether the
+# window refused it or the report is simply not the one this step caused.
+RESIZE_APPLIED=$(grep 'PROBE resized=' "$LOG" | tail -1)
 AFTER_RAIL_W=$(rail_field "$AFTER" railWidth)
 if [ "$CUR_W_MISSING" -eq 1 ]; then
   ok "window-resize-moves-content" 1 "no window size in the rail report"
 elif [ -n "$BEFORE_SLOT" ] && [ -n "$AFTER_SLOT" ] && [ "$AFTER_SLOT" -ne "$BEFORE_SLOT" ]; then
   ok "window-resize-moves-content" 0 "slot ${BEFORE_SLOT} -> ${AFTER_SLOT}"
 else
-  ok "window-resize-moves-content" 1 "before=${BEFORE_SLOT:-none} after=${AFTER_SLOT:-none} window=${CUR_W} asked=${SMALL_W}"
+  ok "window-resize-moves-content" 1 "before=${BEFORE_SLOT:-none} after=${AFTER_SLOT:-none} window=${CUR_W} asked=${SMALL_W} app=[${RESIZE_APPLIED:-no resize line}]"
 fi
 # The rail keeps whatever width the user chose; the window does not stretch it.
 if [ -n "$AFTER_RAIL_W" ] && [ "$AFTER_RAIL_W" = "$BEFORE_RAIL_W" ]; then
