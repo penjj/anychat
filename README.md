@@ -9,7 +9,7 @@
 ## 功能
 
 - **30 个 AI 站点**，分 3 组，按点击频次排序
-- **独立会话**：每个站点单独的 WebView 与存储分区，登录态互不影响
+- **共享登录态**：所有站点共用一个 cookie 存储，Google 系（Gemini / NotebookLM / AI Studio）登录一次即可通用
 - **切换不重载**：站点实例复用，切回来还是原页面
 - **侧栏拖动改宽**：拖到 88px 以下自动收成图标条
 - **主题**：深色、浅色、跟随系统
@@ -106,7 +106,27 @@ scripts/
 https://github.com/penjj/anychat/releases/latest/download/latest.json
 ```
 
-设置面板里有当前版本号和「检查更新」按钮。发现新版本后可以下载安装，装完自动重启。
+启动后 8 秒自动检查一次，发现新版本会在后台把包下载好，并在工具栏和页面之间出现一条提示：点「重启更新」即装好并重启，点 `×` 则本次不再显示。整个过程中**不会在用户没有点确认的情况下替换应用**。
+
+后台先下好再提示，是为了让那个按钮真的是「重启」而不是「开始下载」——点了就立即生效，不用再等 4 MB。
+
+设置面板里有开关可以关掉启动检查，也保留「检查更新」按钮手动触发。
+
+### 国内网络
+
+GitHub 的直连在国内经常超时。应用按顺序尝试下列端点，前一个失败才换下一个：
+
+| 顺序 | 端点 |
+|---|---|
+| 1 | `https://ghproxy.net/` + Release URL |
+| 2 | `https://ghfast.top/` + Release URL |
+| 3 | Release URL（直连） |
+
+注意是**成对**的：第 N 个代理取 `latest-mirrorN.json`，而那份 manifest 里的下载地址也已改写成同一个代理。只代理 manifest 不管用——包还在 github.com 上，只会把卡顿从查询挪到下载。
+
+这些反代是第三方服务，可能随时失效，所以直连永远留在列表最后兜底。签名覆盖的是包本身而不是 URL，改主机名不影响校验。
+
+要加/换代理，改 `src-tauri/src/main.rs` 里的 `GITHUB_PROXIES`，索引要和 `latest-mirrorN.json` 对齐；移除一个就把它置空字符串，不要删数组项，否则后面的编号全错位。
 
 ### 首次配置签名密钥
 
@@ -142,6 +162,8 @@ git push origin v0.2.0
 ```
 
 四个平台的构建各自产出一份只含自身平台的 `latest.json`，`scripts/merge-updater-manifest.py` 把它们合并成一份，附在 Release 根目录。更新器读的就是这一份。
+
+`scripts/mirror-manifest.py` 再据此产出 `latest-mirror1.json`、`latest-mirror2.json`，每份的平台下载地址指向对应反代。两个脚本都由 `release.yml` 自动执行。
 
 本地验证合并逻辑：
 
