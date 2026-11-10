@@ -797,6 +797,21 @@ mod win_env {
         );
     }
 
+    /// How many content views have been created in this process.
+    static CONTENT_VIEWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    pub fn content_views() -> usize {
+        CONTENT_VIEWS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn count_content_view() {
+        CONTENT_VIEWS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn has_environment() -> bool {
+        ENV.load(std::sync::atomic::Ordering::SeqCst) != 0
+    }
+
     pub fn get() -> Option<ICoreWebView2Environment> {
         let addr = ENV.load(std::sync::atomic::Ordering::SeqCst);
         if addr == 0 {
@@ -834,6 +849,28 @@ fn with_shared_environment<R: tauri::Runtime>(
     }
 }
 
+/// Blocks until a content view has published its environment, or gives up.
+///
+/// The environment is published from a background thread precisely so asking
+/// for it cannot re-enter webview creation. That makes publication arrive a
+/// moment later than the child that triggers it, so a second tool opened right
+/// away would find nothing, build its own environment over the same directory,
+/// and fail with ERROR_BUSY -- the original defect. Waiting closes that window.
+///
+/// Bounded, because no environment ever appearing means the first child failed,
+/// and then the caller should proceed and let the failure surface as it is.
+#[cfg(windows)]
+fn wait_for_environment(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if win_env::has_environment() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    win_env::has_environment()
+}
+
 fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let tool = tools::get(id)?;
     let label = format!("tool_{id}");
@@ -845,6 +882,12 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(url));
     #[cfg(windows)]
     {
+        // The first content view has nobody to wait for; every later one waits
+        // for the environment its predecessor publishes on a background thread.
+        if win_env::content_views() > 0 {
+            let _ = wait_for_environment(std::time::Duration::from_secs(3));
+        }
+        win_env::count_content_view();
         builder = with_shared_environment(builder);
     }
 
@@ -996,11 +1039,22 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
         .ok()?;
     #[cfg(windows)]
     {
-        // Recorded before the reporting below, and on this thread: `with_webview`
-        // runs its closure inline when it is already on the main thread, so
-        // asking for the environment from a freshly created child is safe but
-        // must not be interleaved with reads that assume the child is settled.
-        remember_environment(&webview);
+        // Published from a background context, never from here. `with_webview`
+        // runs its closure inline when the caller is already on the main
+        // thread, and asking a just-created child for its environment re-enters
+        // creation and never returns -- which is why this line used to hang the
+        // window: the child existed, nothing printed after it, and every later
+        // tool inherited an environment that was never published.
+        //
+        // Queued through the runtime instead: by the time the message runs, the
+        // webview is past this frame and the call completes.
+        {
+            let late = webview.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                remember_environment(&late);
+            });
+        }
         // A content view that reports about:blank here never received the
         // navigation it was built with, and every later read agrees. Printed
         // once per creation, so a white window has a line that says which side
