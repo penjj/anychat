@@ -154,18 +154,6 @@ jobs:
         shell: bash
         timeout-minutes: 12
 
-      # Which of the two explains the white content view: the shared WebView2
-      # environment, or navigation being broken regardless. Without an
-      # environment each content view builds its own over the same directory,
-      # so this only asks whether the first one can navigate at all -- it is
-      # not a supported mode and the run is expected to be slow and noisy.
-      - name: Diagnose — content view without a shared environment
-        # `always()`: the normal gate failing is exactly when this matters.
-        if: always() && matrix.name == 'win-x64'
-        run: ANYCHAT_NO_SHARED_ENV=1 bash scripts/smoke.sh || true
-        shell: bash
-        timeout-minutes: 12
-
       # The live gate. It talks to the running app over stdin so the event loop
       # stays free, which is the only way the rail and the tool pages can
       # answer. This is where a white page and an unclickable panel show up.

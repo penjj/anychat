@@ -514,12 +514,12 @@ d = json.loads(raw[5:])
 h = d.get("settingsHit")
 print("" if h is None else json.dumps(h, separators=(",", ":")))
 ' 2>/dev/null)
+  # Keep waiting until the panel is actually hit-testable. Anything else -- a
+  # missing field, a zero rect -- is a report from before the panel laid out,
+  # and judging it would call a correct panel broken because the read was early.
   case "$HIT" in
-    # A zero rect means the panel had not laid out yet; keep waiting for one
-    # that has, which is the only state worth judging.
-    *'"ok":false'*zero-rect*) sleep 0.4 ;;
-    "") sleep 0.4 ;;
-    *) break ;;
+    *'"ok":true'*) break ;;
+    *) sleep 0.4 ;;
   esac
 done
 if [ -z "${HIT:-}" ]; then

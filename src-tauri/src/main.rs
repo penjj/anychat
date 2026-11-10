@@ -882,21 +882,13 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(url));
     #[cfg(windows)]
     {
-        // Diagnostic escape hatch: ANYCHAT_NO_SHARED_ENV=1 makes each content
-        // view build its own environment. Two views over one user-data
-        // directory then collide with ERROR_BUSY, so this is not a supported
-        // mode -- it exists to tell "the shared environment broke navigation"
-        // apart from "navigation is broken anyway".
-        if std::env::var("ANYCHAT_NO_SHARED_ENV").is_err() {
-            // The first content view has nobody to wait for; every later one
-            // waits for the environment its predecessor publishes on a
-            // background thread.
-            if win_env::content_views() > 0 {
-                let _ = wait_for_environment(std::time::Duration::from_secs(3));
-            }
-            win_env::count_content_view();
-            builder = with_shared_environment(builder);
+        // The first content view has nobody to wait for; every later one waits
+        // for the environment its predecessor publishes on a background thread.
+        if win_env::content_views() > 0 {
+            let _ = wait_for_environment(std::time::Duration::from_secs(3));
         }
+        win_env::count_content_view();
+        builder = with_shared_environment(builder);
     }
 
     // Session storage, per platform. Never both on macOS: wry prefers the custom
@@ -1047,39 +1039,34 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
         .ok()?;
     #[cfg(windows)]
     {
-        // Everything below runs off the creation frame. Asking a webview that
-        // is still being created for its URL blocks: `url()` goes through the
-        // same channel as creation and is queued behind the frame that has not
-        // returned yet. That single call was the whole stall -- the child
-        // existed, nothing printed after it, and the window stayed white.
+        // Runs off the creation frame. Asking a webview that is still being
+        // created for its URL blocks: `url()` goes through the same channel as
+        // creation and is queued behind the frame that has not returned yet.
+        // Calling it inline was the whole stall -- the child existed, nothing
+        // after it ran, and the window stayed white.
         let late = webview.clone();
-        let report_label = label.clone();
         let owned_id = id.to_string();
         std::thread::spawn(move || {
             // Long enough for creation to finish and the browser to start.
             std::thread::sleep(std::time::Duration::from_millis(600));
             // Publishing first: every later content view waits for it.
             remember_environment(&late);
-            let initial = late
+            let on_blank = late
                 .url()
-                .map(|u| u.to_string())
-                .unwrap_or_else(|e| format!("err:{e}"));
-            println!("TOOLURL {report_label} initial={initial}");
-            if initial == "about:blank" {
-                // The controller can exist before the browser behind it, and a
-                // navigation issued in that window is dropped without an error.
-                if let Ok(target) = tools::get(&owned_id).map(|t| t.url).unwrap_or_default().parse() {
-                    match late.navigate(target) {
-                        Ok(()) => println!("TOOLURL {report_label} reissued"),
-                        Err(e) => println!("TOOLURL {report_label} reissue-err {e}"),
-                    }
-                }
+                .map(|u| u.as_str() == "about:blank")
+                .unwrap_or(false);
+            if !on_blank {
+                return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(2500));
-            println!(
-                "TOOLURL {report_label} settled={:?}",
-                late.url().map(|u| u.to_string()).unwrap_or_else(|e| format!("err:{e}"))
-            );
+            // A controller can exist before the browser behind it, and a
+            // navigation issued in that window is dropped without an error.
+            // The view is then real but empty, which is the white window.
+            let Some(tool) = tools::get(&owned_id) else { return };
+            let Ok(target) = tool.url.parse() else { return };
+            match late.navigate(target) {
+                Ok(()) => eprintln!("anychat: reissued navigation for tool_{owned_id}"),
+                Err(e) => eprintln!("anychat: could not reissue navigation for tool_{owned_id}: {e}"),
+            }
         });
     }
     let _ = webview.set_zoom(load_layout(app).zoom);
@@ -2630,31 +2617,14 @@ fn run_probe_command(h: tauri::AppHandle, cmd: String) {
                                 if let Err(e) = &apply {
                                     println!("PROBE resize-set-err {e}");
                                 }
-                                // Wait for the window to actually become the
-                                // requested size. `set_size` is asynchronous on
-                                // macOS: reading `inner_size` straight after it
-                                // returns the size from *before* this call, so
-                                // every report was one resize behind -- asking
-                                // for 660 reported 820, asking for 980 reported
-                                // 660. That lag is what made the resize check
-                                // compare two identical, stale numbers.
-                                let want = (parts[0], parts[1]);
-                                let mut got = String::new();
-                                // Fifteen seconds. Measured on a hosted runner:
-                                // the window server applies a resize in seconds,
-                                // not in frames, and a shorter bound reports the
-                                // previous size as if the request were refused.
-                                // The driver waits for this line before moving on,
-                                // so the extra time costs one step, not every step.
                                 // Reported once, without waiting. This handler
                                 // runs on the main thread, so waiting here would
                                 // block the very event loop that performs the
-                                // resize: every read then returns the size from
-                                // before the call, no matter how long it waits.
-                                // That is why the report always looked one step
-                                // behind. The driver waits for the next report
-                                // instead, which arrives after the loop has had a
-                                // chance to act.
+                                // resize, and every read would then return the
+                                // size from before the call no matter how long it
+                                // waited -- which is why this report always looked
+                                // one step behind. The driver waits for the page
+                                // to report the new width instead.
                                 let scale = w.scale_factor().unwrap_or(1.0);
                                 let got = w
                                     .inner_size()
