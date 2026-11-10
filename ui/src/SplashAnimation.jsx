@@ -13,13 +13,19 @@ import { useEffect, useRef, useState } from 'react'
  * point budget is high and every point gets its own mote — sharing a smaller
  * pool leaves holes in the letters.
  *
- * Timeline (≈5.4s):
- *   0.0–0.5  the field ignites; motes drift in from the edges
- *   0.5–2.8  motes curve inward and lock onto the letter shape
- *   2.8–4.4  hold, the word legible as light
- *   4.4–5.4  the field lifts and fades; the main window takes over
+ * Timeline (≈3.0s):
+ *   0.0–0.3  the field ignites; motes drift in from the edges
+ *   0.3–1.6  motes curve inward and lock onto the letter shape
+ *   1.6–2.4  hold, the word legible as light
+ *   2.4–3.0  the field lifts and fades; the main window takes over
+ *
+ * Every beat below is expressed as a fraction of TOTAL or derived from it, so
+ * changing the length does not leave a stale absolute somewhere in the middle
+ * of the film. The handover does not depend on this timer at all -- the rail
+ * releases the splash as soon as it can be used -- so this is the fallback for
+ * a start slow enough that the film runs out first.
  */
-const TOTAL = 5400
+const TOTAL = 3000
 const TEXT = 'AnyChat'
 
 /** Sample points to aim for. The word is drawn only by these motes, so the
@@ -112,7 +118,8 @@ export default function SplashAnimation () {
   }, [])
 
   useEffect(() => {
-    const b = setTimeout(() => setExiting(true), 4400)
+    // Exit at the same point in the film as before (4400/5400 of the way in).
+    const b = setTimeout(() => setExiting(true), TOTAL * 0.815)
     return () => clearTimeout(b)
   }, [])
 
@@ -209,7 +216,9 @@ export default function SplashAnimation () {
     const ready = Promise.race([
       document.fonts.load(`800 64px ${getComputedStyle(document.documentElement)
         .getPropertyValue('--font-display').trim()}`).catch(() => {}),
-      new Promise((r) => setTimeout(r, 400)),
+      // Capped in proportion to the film: on a 3s launch a 400ms stall before
+      // anything is drawn would be a visible pause at the start.
+      new Promise((r) => setTimeout(r, TOTAL * 0.074)),
     ])
     ready.then(build)
 
@@ -232,7 +241,10 @@ export default function SplashAnimation () {
       ctx.globalCompositeOperation = 'lighter'
 
       /* --- ambient motes: they keep the air full, then clear out of the way --- */
-      const airA = clamp01(1 - (elapsed - 1400) / 1200)
+      // Ambient light clears between 1400ms and 2600ms of the original 5400ms
+      // film; both ends scale with TOTAL so the overlap with the letters is
+      // unchanged when the film is shortened.
+      const airA = clamp01(1 - (elapsed - TOTAL * 0.259) / (TOTAL * 0.222))
       if (airA > 0.01) {
         for (const m of ambient) {
           const x = m.x + Math.sin(elapsed * 0.00025 + m.phase) * 18 + m.vx * elapsed
@@ -254,7 +266,8 @@ export default function SplashAnimation () {
       const settleDim = 0.12
       for (let i = 0; i < motes.length; i += 1) {
         const m = motes[i]
-        const local = clamp01((elapsed - 420 - m.delay) / 2250)
+        // Gathering starts at 420ms and takes 2250ms of the original film.
+        const local = clamp01((elapsed - TOTAL * 0.0778 - m.delay) / (TOTAL * 0.4167))
         const eased = easeOutCubic(local)
 
         // Spiral inward: the angle keeps turning while the radius collapses, so
@@ -312,9 +325,6 @@ export default function SplashAnimation () {
     <div className={`splash${exiting ? ' is-exiting' : ''}`}>
       <div className="splash-grain" />
       <canvas ref={canvasRef} className="splash-dust" />
-      <div className="splash-stage">
-        <div className="tagline">多模型聊天工作台</div>
-      </div>
     </div>
   )
 }
