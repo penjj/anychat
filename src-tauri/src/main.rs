@@ -745,41 +745,46 @@ fn store_id(_id: &str) -> [u8; 16] {
 /// several WKWebViews coexisting is normal.
 #[cfg(windows)]
 mod win_env {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
+    use windows_core::Interface;
 
-    /// The live environment pointer, or 0 when no webview has been created yet.
+    /// The live environment, once any webview has been created.
     ///
-    /// Stored as an address because `ICoreWebView2Environment` is a COM
-    /// interface and is not `Send`. The pointer stays valid for the life of the
-    /// process: WebView2 keeps the environment alive as long as any controller
-    /// refers to it, and one always does after the first child exists.
-    static ENV: AtomicUsize = AtomicUsize::new(0);
+    /// A COM interface is not `Send`, and Tauri hands it out only inside
+    /// `with_webview`, so it cannot simply be kept in a `static`. The address it
+    /// carries is stored instead -- `as_raw()` gives the interface pointer, which
+    /// is stable for the life of the process because WebView2 keeps an
+    /// environment alive as long as any controller refers to it.
+    ///
+    /// Taking the address of the *wrapper* rather than the interface is the
+    /// mistake to avoid: `&env as *const _ as usize` stores a stack address that
+    /// dies with the call. That read back as whatever happened to occupy the
+    /// slot -- on the runner, a UTF-16 fragment -- and aborted with "misaligned
+    /// pointer dereference" before the window existed.
+    static ENV: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-    pub fn publish(env: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment) {
-        // First writer wins. Later children have the same environment, so a
-        // second store would be the same address and a no-op either way.
+    pub fn publish(env: &ICoreWebView2Environment) {
+        // First writer wins. Later children hold the same environment, so a
+        // second store would be the same pointer anyway.
         let _ = ENV.compare_exchange(
             0,
-            env as *const _ as *const () as usize,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
+            env.as_raw() as usize,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
         );
     }
 
-    pub fn get() -> Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment> {
-        let addr = ENV.load(Ordering::SeqCst);
+    pub fn get() -> Option<ICoreWebView2Environment> {
+        let addr = ENV.load(std::sync::atomic::Ordering::SeqCst);
         if addr == 0 {
             return None;
         }
-        // SAFETY: `publish` only ever stores a pointer handed out by Tauri for a
-        // live webview, and WebView2 keeps that environment alive for as long
-        // as the process has a controller. AddRef is taken so the returned
-        // clone has its own reference and cannot outlive its owner by surprise.
-        unsafe {
-            let p = addr as *const webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
-            let raw: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment = &*p;
-            Some(raw.clone())
-        }
+        // SAFETY: only `publish` writes this, with a pointer taken from a live
+        // webview's environment, and that environment outlives every controller
+        // including the one about to be created. `from_raw` takes its own
+        // reference, so the caller's handle is independent of the original
+        // webview's lifetime.
+        unsafe { Some(ICoreWebView2Environment::from_raw(addr as *mut _)) }
     }
 }
 
