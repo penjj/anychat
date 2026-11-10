@@ -111,6 +111,14 @@ struct Layout {
     /// "never set", which is what lets the platform default below take over.
     #[serde(default)]
     shortcut: String,
+    /// Where a link that leaves the current site should open.
+    ///
+    /// "browser" keeps the tool webview on its own site: without it, clicking a
+    /// citation mid-conversation navigated the chat away and the conversation
+    /// was still there, one back-press from being lost. "app" keeps everything
+    /// inside, which is what a kiosk-style setup wants.
+    #[serde(default = "default_external_links")]
+    external_links: String,
     /// Whether to look for a newer release shortly after launch. On by default:
     /// an app installed from a download link has no other way to learn that it
     /// is behind. Nothing is downloaded or installed without the user clicking
@@ -121,6 +129,11 @@ struct Layout {
 
 fn default_true() -> bool {
     true
+}
+
+/// Open links that leave the site in the system browser.
+fn default_external_links() -> String {
+    "browser".to_string()
 }
 
 fn default_theme() -> String {
@@ -169,6 +182,7 @@ impl Default for Layout {
             theme: default_theme(),
             shortcut: String::new(),
             auto_check_update: true,
+            external_links: default_external_links(),
         }
     }
 }
@@ -642,6 +656,8 @@ struct StateDto {
     /// Mirrors the saved preference so the checkbox reflects the setting that
     /// actually governs the next launch, not a transient toggle position.
     auto_check_update: bool,
+    /// "browser" or "app": where links leaving the current site go.
+    external_links: String,
     /// The version waiting to be applied, if any. Null when there is none, so
     /// the banner is driven by state rather than by a separate event that could
     /// be missed during a reload.
@@ -720,12 +736,48 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     // cross-origin documents: the rail's keydown listener never fires for them,
     // and a menu accelerator does not apply either. Injecting a listener is the
     // only way, and it talks to a single whitelisted command.
+    // ⌘N, and the link policy.
+    //
+    // Links are intercepted here rather than through a navigation handler
+    // because the decision is per-click and needs the target: a citation inside
+    // a chat must not navigate the chat away, while the site's own routes must
+    // keep working. Same-registrable-domain links are left entirely alone, so
+    // the SPA routing of every site is unaffected.
     builder = builder.initialization_script(
         r#"document.addEventListener('keydown', function (e) {
              if (!(e.metaKey || e.ctrlKey) || e.shiftKey) return;
              if (e.key !== 'n' && e.key !== 'N') return;
              e.preventDefault();
              try { window.__TAURI_INTERNALS__.invoke('new_chat') } catch (_) {}
+           }, true);
+
+           // Set by the host once the saved preference is known. Defaults to
+           // leaving the page alone, so a webview that loads before the flag
+           // arrives behaves exactly as it did before this existed.
+           window.__ANYCHAT_EXTERNAL__ = window.__ANYCHAT_EXTERNAL__ || 'app';
+
+           function registrable(host) {
+             var parts = String(host || '').split('.');
+             return parts.slice(-2).join('.');
+           }
+
+           document.addEventListener('click', function (e) {
+             if (e.defaultPrevented || e.button !== 0) return;
+             if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+             var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+             if (!a) return;
+             var href = a.getAttribute('href') || '';
+             if (!href || href.charAt(0) === '#') return;
+             if (a.hasAttribute('download') || a.target === '_blank') return;
+             var url;
+             try { url = new URL(href, location.href) } catch (_) { return; }
+             if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+             // Same site: let the page handle its own routing.
+             if (registrable(url.hostname) === registrable(location.hostname)) return;
+             if (window.__ANYCHAT_EXTERNAL__ !== 'browser') return;
+             e.preventDefault();
+             e.stopPropagation();
+             try { window.__TAURI_INTERNALS__.invoke('open_external', { url: url.href }) } catch (_) {}
            }, true);
 "#,
     );
@@ -754,6 +806,9 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
         )
         .ok()?;
     let _ = webview.set_zoom(load_layout(app).zoom);
+    // A tool created after the preference changed must start with it, not with
+    // the conservative default the script assumes.
+    apply_external_links_to(app, &webview, &load_layout(app).external_links);
     let _ = webview.hide();
     Some(webview)
 }
@@ -1096,6 +1151,7 @@ fn state_dto(app: &tauri::AppHandle) -> StateDto {
         theme: load_layout(app).theme,
         version: app.package_info().version.to_string(),
         auto_check_update: load_layout(app).auto_check_update,
+        external_links: load_layout(app).external_links,
         update_ready: app.state::<App>().update_ready.lock().unwrap().clone(),
     }
 }
@@ -1881,6 +1937,44 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_external_links(app: tauri::AppHandle, mode: String) -> Result<String, String> {
+    let mode = match mode.as_str() {
+        "browser" | "app" => mode,
+        other => return Err(format!("unknown external_links: {other}")),
+    };
+    let mut layout = load_layout(&app);
+    layout.external_links = mode.clone();
+    save_layout(&app, &layout);
+    apply_external_links(&app, &mode);
+    emit_state(&app);
+    Ok(mode)
+}
+
+/// Pushes the link policy into every live tool webview.
+///
+/// The flag lives in the page, not in the host's head: the click happens in a
+/// cross-origin document the host never sees, so the only way to change the
+/// behaviour for an already-open tool is to rewrite that document's global.
+/// Applied to all of them, including hidden ones -- a switch made now has to
+/// hold when the user returns to a tool they left open.
+fn apply_external_links(app: &tauri::AppHandle, mode: &str) {
+    for tool in tools::TOOLS {
+        if let Some(w) = app.get_webview(&format!("tool_{}", tool.id)) {
+            apply_external_links_to(app, &w, mode);
+        }
+    }
+}
+
+/// Single-webview form, used both by the broadcast and at creation time.
+fn apply_external_links_to(_app: &tauri::AppHandle, webview: &Webview, mode: &str) {
+    let js = format!(
+        "window.__ANYCHAT_EXTERNAL__ = {}",
+        serde_json::to_string(mode).unwrap_or_else(|_| "\"app\"".into())
+    );
+    let _ = webview.eval(&js);
+}
+
+#[tauri::command]
 fn set_auto_check_update(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
     let mut layout = load_layout(&app);
     layout.auto_check_update = enabled;
@@ -2118,11 +2212,38 @@ fn start_probe(app: tauri::AppHandle) {
                     }
                     "show" => { show_window(&h); }
                     "hide" => { if let Some(w) = h.get_window("main") { let _ = w.hide(); } }
+                    // Whether the injected policy is present in the live page.
+                    // eval() cannot return a value to the host, so the report
+                    // comes back through the page title on the next read.
+                    "linkpolicy" => {
+                        let active = h.state::<App>().active.lock().unwrap().clone();
+                        match h.get_webview(&format!("tool_{active}")) {
+                            Some(w) => {
+                                let probe = "document.title = 'LP:' + (window.__ANYCHAT_EXTERNAL__ || 'missing')";
+                                match w.eval(probe) {
+                                    Ok(()) => println!("PROBE linkpolicy dispatched"),
+                                    Err(e) => println!("PROBE linkpolicy err {e}"),
+                                }
+                            }
+                            None => println!("PROBE linkpolicy no_webview"),
+                        }
+                    }
+                    cmd if cmd.starts_with("external_links ") => {
+                        let mode = cmd["external_links ".len()..].trim().to_string();
+                        match set_external_links(h.clone(), mode) {
+                            Ok(m) => println!("PROBE external_links_set {m}"),
+                            Err(e) => println!("PROBE external_links_err {e}"),
+                        }
+                    }
                     "state" => {
                         let dto = state_dto(&h);
                         let (win_w, win_h) = logical_window_size(&h);
                         println!("PROBE state icons={} open={} rail={} win={}x{}",
                             dto.icon_count, dto.settings_open, dto.rail_width, win_w, win_h);
+                        println!(
+                            "PROBE external_links={}",
+                            dto.external_links
+                        );
                         // The banner is rendered by the rail page from this
                         // state, so the version here is what the user is
                         // actually being offered.
@@ -2718,6 +2839,7 @@ fn main() {
             close_settings,
             set_autostart,
             set_auto_check_update,
+            set_external_links,
             set_theme,
             set_shortcut,
             check_update,

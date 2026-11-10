@@ -1076,6 +1076,33 @@ export default function App () {
               ? `快捷键注册失败：${shortcutError || state.shortcut}被占用，已恢复原设置。可在托盘菜单召唤。`
               : `${prettyShortcut(state.shortcut)} 显隐窗口（不抢焦点）· ⌘N 新会话 · ⌘R 刷新 · ⌘Q 退出`}
           </div>
+          <div className="row">
+            <span>外部链接</span>
+            <span className="seg" role="radiogroup" aria-label="外部链接">
+              {[
+                ['browser', '系统浏览器'],
+                ['app', '应用内'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  role="radio"
+                  aria-checked={state.external_links === value}
+                  className={cl('seg-btn', state.external_links === value && 'active')}
+                  onClick={async () => {
+                    const before = state.external_links
+                    setState((p) => ({ ...p, external_links: value }))
+                    try {
+                      await invoke('set_external_links', { mode: value })
+                    } catch {
+                      setState((p) => ({ ...p, external_links: before }))
+                    }
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </span>
+          </div>
           <label className="row">
             <span>自动检查更新</span>
             <input

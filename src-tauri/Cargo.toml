@@ -1,6 +1,6 @@
 [package]
 name = "anychat"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 description = "Multi-model AI chat workspace on Tauri + system WebView"
 license = "MIT"
