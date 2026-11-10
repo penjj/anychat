@@ -97,14 +97,23 @@ jobs:
         with:
           name: anychat-${{ matrix.name }}
           if-no-files-found: error
+          # The signatures sit beside their installers: `-setup.exe.sig` and
+          # `_en-US.msi.sig`. They were missing from this list, so the Windows
+          # legs uploaded unsigned payloads and nothing on Windows could ever
+          # be updated. The .nsis.zip pattern is kept for the v1-compatible
+          # bundling mode, which wraps the installer instead of signing it bare.
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
             src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.zip
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi.zip.sig
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
-            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.nsis.zip
-            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.nsis.zip.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe.zip
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe.zip.sig
 
   # Attaches every artefact to the tag's release. Runs after all legs so the
   # release appears complete rather than growing file by file.
