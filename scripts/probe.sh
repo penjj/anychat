@@ -27,6 +27,14 @@ APP_BIN=./target/debug/anychat
 ANYCHAT_PROBE=1 ANYCHAT_PROBE_FILE="$CMD_FILE" "$APP_BIN" > "$LOG" 2>&1 &
 APP=$!
 
+# A hard stop for the whole run. Every individual wait below is bounded, but a
+# wedged process on Windows can make even `wait` never return, and a gate that
+# hangs is worse than one that fails: it burns the job's whole budget and
+# reports nothing. The watchdog turns that into a normal failure with output.
+( sleep "${PROBE_DEADLINE:-600}"; echo "PROBE deadline reached" >> "$LOG"; kill -9 "$APP" 2>/dev/null ) &
+WATCHDOG=$!
+
+
 say () { printf '%s\n' "$1" >> "$CMD_FILE"; sleep 1.2; }
 wait_for () { # pattern, timeout_s
   local pat="$1" limit="${2:-20}" i=0
@@ -42,6 +50,7 @@ wait_for () { # pattern, timeout_s
 # script returns before that finishes the app is orphaned and keeps running
 # invisibly -- which is what left a stray AnyChat on screen after a gate run.
 cleanup () {
+  kill "$WATCHDOG" 2>/dev/null || true
   printf 'quit\n' >> "$CMD_FILE" 2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     kill -0 "$APP" 2>/dev/null || break
@@ -57,7 +66,7 @@ cleanup () {
   wait "$APP" 2>/dev/null || true
   rm -f "$CMD_FILE"
 }
-trap cleanup EXIT
+  kill "$WATCHDOG" 2>/dev/null || true
 
 PASS=0; FAIL=0
 ok () { if [ "$2" -eq 0 ]; then echo "PASS $1"; PASS=$((PASS + 1)); else echo "FAIL $1${3:+  $3}"; FAIL=$((FAIL + 1)); fi; }

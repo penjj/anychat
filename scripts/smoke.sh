@@ -59,7 +59,29 @@ echo "== self-check =="
 export ANYCHAT_DATA_DIR="$(mktemp -d)/anychat-gate"
 # Not /tmp: it does not exist on Windows, and this gate runs there.
 SMOKE_OUT="$(pwd)/target/anychat-smoke.txt"
-ANYCHAT_SMOKE=1 ./target/debug/anychat 2>&1 | grep -viE "IMKCFRunLoop|mach port" > "$SMOKE_OUT" || true
+# Not piped into grep. The app exits by itself, but its WebView2 child
+# processes inherit the same stdout handle on Windows and outlive it, so the
+# pipe never sees EOF and the whole gate hangs with no output at all -- which is
+# what it did on the first Windows run. Writing to a file removes the pipe, and
+# the timeout bounds the wait even if the app itself never exits.
+RAW_OUT="$SMOKE_OUT.raw"
+# `timeout` is GNU coreutils: present in Git Bash, absent on a stock macOS, so
+# fall back to launch-and-bound. The app is expected to exit on its own; the
+# bound only covers the case where it does not.
+if command -v timeout >/dev/null 2>&1; then
+  ANYCHAT_SMOKE=1 timeout 180 ./target/debug/anychat > "$RAW_OUT" 2>&1 || true
+else
+  ANYCHAT_SMOKE=1 ./target/debug/anychat > "$RAW_OUT" 2>&1 &
+  SMOKE_PID=$!
+  for _ in $(seq 1 600); do
+    kill -0 "$SMOKE_PID" 2>/dev/null || break
+    sleep 0.3
+  done
+  kill -9 "$SMOKE_PID" 2>/dev/null || true
+  wait "$SMOKE_PID" 2>/dev/null || true
+fi
+grep -viE "IMKCFRunLoop|mach port" "$RAW_OUT" > "$SMOKE_OUT" || true
+rm -f "$RAW_OUT"
 # `set -e` would abort here on a failing self-check, which is why the status is
 # captured with `||` instead of `$?` -- the latter is unreachable in that case.
 SELF_CHECK=0
