@@ -455,5 +455,13 @@ else
 fi
 say "settings.close"
 
+# The app's own log never reaches the CI console -- it lives in a temp file --
+# so a failing assertion had no evidence beside it and the numbers in the report
+# could not be checked against what the app actually said. Printed on failure
+# only: on success it is noise.
+if [ "$FAIL" -ne 0 ]; then
+  echo "== app log (tail) =="
+  grep -E '^(RAIL|PROBE|PAINT|anychat)' "$LOG" 2>/dev/null | tail -40 || echo "(no app log)"
+fi
 echo "RESULT $([ $FAIL -eq 0 ] && echo ok || echo "FAILED $FAIL")"
 [ $FAIL -eq 0 ]

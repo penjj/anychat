@@ -995,7 +995,25 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
         )
         .ok()?;
     #[cfg(windows)]
-    remember_environment(&webview);
+    {
+        remember_environment(&webview);
+        // Diagnostic: a content view that reports about:blank here never
+        // received the navigation it was built with, and every later read
+        // agrees. Printed once per creation, so a white window has a line that
+        // says which side of the handoff it came from.
+        let probe = webview.clone();
+        println!(
+            "TOOLURL {label} initial={:?}",
+            probe.url().map(|u| u.to_string()).unwrap_or_else(|e| format!("err:{e}"))
+        );
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(3000));
+            println!(
+                "TOOLURL {label} settled={:?}",
+                probe.url().map(|u| u.to_string()).unwrap_or_else(|e| format!("err:{e}"))
+            );
+        });
+    }
     let _ = webview.set_zoom(load_layout(app).zoom);
     // A tool created after the preference changed must start with it, not with
     // the conservative default the script assumes.
