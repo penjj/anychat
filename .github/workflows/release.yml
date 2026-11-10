@@ -43,6 +43,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          # Pin the registry. A lockfile generated behind a mirror records that
+          # mirror's URLs, and a mirror that rate-limits or 503s fails every
+          # leg at once -- which is exactly how a release died with no code
+          # change behind it.
+          registry-url: https://registry.npmjs.org
 
       # The rail UI is a build input, not a committed artefact: `frontend/` is
       # regenerated here so the bundle always matches the source in this commit.
