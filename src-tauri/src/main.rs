@@ -844,11 +844,15 @@ fn order_front_without_activating(_window: &tauri::Window) {}
 /// then closes itself. Nothing here loads app state: it is a single canvas, so
 /// it can paint before the rail or any tool webview exists.
 /// Milliseconds since process start, for timing the launch animation.
+/// Wall time since the process started.
+///
+/// The clock has to begin before the first caller, or every measurement is
+/// relative to whenever it happened to be asked: the splash used to report
+/// "opening at 0ms" on a launch that had already taken hundreds.
 fn boot_ms() -> u128 {
     use std::sync::OnceLock;
     static START: OnceLock<std::time::Instant> = OnceLock::new();
-    let t0 = START.get_or_init(std::time::Instant::now);
-    t0.elapsed().as_millis()
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis()
 }
 
 fn build_splash(app: &tauri::AppHandle, monitor: Option<Monitor>) -> tauri::Result<()> {
@@ -953,21 +957,34 @@ fn splash_stats(points: u32, step: u32, size: f64) {
     );
 }
 
-/// Called by the splash once its animation has finished. Closing the splash
-/// first and only then revealing the main window avoids a frame where both are
-/// composited on top of each other.
-#[tauri::command]
-fn splash_done(app: tauri::AppHandle) {
-    eprintln!("anychat: splash done, handing over at {}ms", boot_ms());
+/// Closes the splash and reveals the main window.
+///
+/// Idempotent: whichever signal arrives first wins, and the other is a no-op.
+/// There are two because either can be the real one depending on the machine --
+/// a fast start is ready before the animation's exit beat, a cold one is not.
+fn hand_over_from_splash(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering::SeqCst;
+    // The window must be shown before the splash goes, or one frame is
+    // composited with neither. The swap also makes this the only call that acts.
+    if app.state::<App>().booted.swap(true, SeqCst) {
+        return;
+    }
+    eprintln!("anychat: handing over at {}ms", boot_ms());
     if let Some(splash) = app.get_window(SPLASH_LABEL) {
         let _ = splash.close();
     }
-    if app.state::<App>().booted.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return;
+    if std::env::var("ANYCHAT_DEMO_SHOW").is_ok()
+        || app.state::<App>().wants_visible.load(SeqCst)
+    {
+        show_window(app);
     }
-    if std::env::var("ANYCHAT_DEMO_SHOW").is_ok() || app.state::<App>().wants_visible.load(std::sync::atomic::Ordering::SeqCst) {
-        show_window(&app);
-    }
+}
+
+/// Called by the splash when its animation ends, as a fallback for a start slow
+/// enough that the rail was not ready first.
+#[tauri::command]
+fn splash_done(app: tauri::AppHandle) {
+    hand_over_from_splash(&app);
 }
 
 fn show_window(app: &tauri::AppHandle) {
@@ -1024,6 +1041,11 @@ fn list_tools() -> Vec<Tool> {
 fn rail_ready(app: tauri::AppHandle, report: String) {
     println!("RAIL {report}");
     *app.state::<App>().rail.lock().unwrap() = Some(report);
+    // The rail is mounted and laid out, which is the earliest point the window
+    // can be handed over without the user watching it assemble. Release the
+    // splash now rather than after a fixed animation: the film is the reason a
+    // launch felt like five seconds when the app itself was ready in one.
+    hand_over_from_splash(&app);
 }
 
 #[tauri::command]
@@ -2828,6 +2850,17 @@ fn main() {
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                     if std::env::var("ANYCHAT_DEMO_SHOW").is_ok() {
                         show_window(&handle);
+                    }
+                } else if handle
+                    .state::<App>()
+                    .booted
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    // The rail beat the splash into existence. Closing it now
+                    // is the only way to avoid a window that nothing will ever
+                    // dismiss, since the handover already happened.
+                    if let Some(splash) = handle.get_window(SPLASH_LABEL) {
+                        let _ = splash.close();
                     }
                 }
             } else {
