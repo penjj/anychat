@@ -50,7 +50,6 @@ pub const TOOLS: &[Tool] = &[
     t("spark", "星火", "cn", "https://xinghuo.xfyun.cn/desk", "https://xinghuo.xfyun.cn/desk"),
     t("zai", "Z.ai", "cn", "https://zchat.z.ai/", "https://zchat.z.ai/"),
     // ---- 构建 ----
-    t("githubcopilot", "GitHub Copilot", "build", "https://github.com/copilot", "https://github.com/copilot"),
     t("v0", "v0", "build", "https://v0.app/", "https://v0.app/"),
     t("lovable", "Lovable", "build", "https://lovable.dev/", "https://lovable.dev/"),
     t("bolt", "Bolt", "build", "https://bolt.new/", "https://bolt.new/"),
