@@ -65,6 +65,7 @@ SMOKE_OUT="$(pwd)/target/anychat-smoke.txt"
 # what it did on the first Windows run. Writing to a file removes the pipe, and
 # the timeout bounds the wait even if the app itself never exits.
 RAW_OUT="$SMOKE_OUT.raw"
+trap 'rm -f "$RAW_OUT"' EXIT
 # `timeout` is GNU coreutils: present in Git Bash, absent on a stock macOS, so
 # fall back to launch-and-bound. The app is expected to exit on its own; the
 # bound only covers the case where it does not.
@@ -81,7 +82,11 @@ else
   wait "$SMOKE_PID" 2>/dev/null || true
 fi
 grep -viE "IMKCFRunLoop|mach port" "$RAW_OUT" > "$SMOKE_OUT" || true
-rm -f "$RAW_OUT"
+# Echo the capture before parsing it. If the app wedges, the parser below only
+# says there was no summary; the last few lines are what identify where it
+# stopped, and they are otherwise invisible until someone downloads an artifact.
+echo "== app output (tail) =="
+grep -viE "IMKCFRunLoop|mach port" "$RAW_OUT" | tail -30 || true
 # `set -e` would abort here on a failing self-check, which is why the status is
 # captured with `||` instead of `$?` -- the latter is unreachable in that case.
 SELF_CHECK=0
@@ -90,8 +95,11 @@ import json, os, sys, pathlib
 txt = pathlib.Path(os.environ['SMOKE_OUT']).read_text()
 marker = txt.rfind('SMOKE ')
 if marker < 0:
-    print('no SMOKE output; raw log:')
-    print(txt[:2000])
+    # Say how much there was, not just that there was nothing useful: an empty
+    # capture means the app died before printing, a non-empty one means it ran
+    # and never reached the summary, and those are different bugs.
+    print(f'no SMOKE output; captured {len(txt)} bytes')
+    print(txt[-4000:])
     sys.exit(1)
 d, _ = json.JSONDecoder().raw_decode(txt[marker + 6:].lstrip())
 for s in d['steps']:

@@ -2741,6 +2741,12 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
 
     let mut results: Vec<(String, bool, String)> = Vec::new();
     let mut check = |name: &str, ok: bool, detail: String| {
+        // Printed as it happens, not only in the summary at the end. Written to
+        // a file, stdout is block-buffered, so a gate that wedges never flushes
+        // and CI shows an empty log -- which is exactly how the first Windows
+        // run failed: no output at all, and therefore no clue.
+        println!("CHECK {name} {}", if ok { "pass" } else { "fail" });
+        let _ = std::io::stdout().flush();
         results.push((name.to_string(), ok, detail));
     };
 
