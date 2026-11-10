@@ -329,11 +329,15 @@ fi
 # and be "shown" while nothing is composited, which `get_webview` cannot see.
 # The page is the only witness, and it can only answer while the event loop is
 # free -- which is why this lives here and not in the in-process gate.
-# grok, perplexity and mistral are excluded: their pages load a URL and then
-# never run a single injected script, so they report nothing. That is a real
-# defect under investigation, not a passing baseline -- pinning a check to it
-# would either hide the defect or fail forever. The two below are the sites that
-# do answer, and they prove the switching path itself works.
+# Two sites, not every site. The assertion is about the switching path, and a
+# site that cannot be reached fails it for a reason that has nothing to do with
+# the app: grok, perplexity and mistral report nothing here because this machine
+# cannot open them at all (curl exits 35, and the webview stays on its initial
+# URL without ever running a script). A check pinned to an unreachable host would
+# fail forever for the wrong reason, so it stays on the sites that answer.
+#
+# What the two below do prove is that a page *can* talk back and that switching
+# between tools leaves the new one painted.
 for TOOL in chatgpt gemini; do
   say "select $TOOL"
   if wait_for "^PAINT tool_$TOOL true" 25; then

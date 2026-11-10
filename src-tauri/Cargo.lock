@@ -59,7 +59,6 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-updater",
  "ureq",
- "webview2-com",
 ]
 
 [[package]]

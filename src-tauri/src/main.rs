@@ -720,53 +720,6 @@ fn store_id(_id: &str) -> [u8; 16] {
     *b"anychat-shared01"
 }
 
-/// The single WebView2 environment every child webview shares on Windows.
-///
-/// Each `add_child` without this creates its own `ICoreWebView2Environment`,
-/// and several environments pointed at one user-data folder contend for its
-/// lock. The loser initialises to a blank page -- the "only one chat works,
-/// the rest are white" symptom -- and, worse, separate environments put the
-/// children in separate render processes, so a child can end up composited
-/// above the rail page that is supposed to cover it. Sharing one environment
-/// gives one user-data folder, one browser process and a coherent z-order.
-///
-/// macOS is unaffected: `data_store_identifier` already shares a store there,
-/// and WKWebView has no equivalent environment object.
-#[cfg(windows)]
-fn shared_environment() -> &'static std::sync::Mutex<Option<
-    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
->> {
-    static ENV: std::sync::OnceLock<std::sync::Mutex<Option<
-        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
-    >>> = std::sync::OnceLock::new();
-    ENV.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-/// Records the environment a webview was built with, so the next one can reuse
-/// it. Called for every child; the first one to run is the one that creates it.
-#[cfg(windows)]
-fn remember_environment(webview: &Webview) {
-    if let Ok(mut slot) = shared_environment().lock() {
-        if slot.is_none() {
-            slot.replace(webview.environment());
-        }
-    }
-}
-
-/// Attaches the shared environment to a builder when one is known.
-///
-/// The very first child has nothing to reuse and must create the environment,
-/// so it goes without; every later one joins it.
-#[cfg(windows)]
-fn with_shared_environment(mut builder: WebviewBuilder<'_>) -> WebviewBuilder<'_> {
-    if let Ok(slot) = shared_environment().lock() {
-        if let Some(env) = slot.as_ref() {
-            builder = builder.with_environment(env.clone());
-        }
-    }
-    builder
-}
-
 fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let tool = tools::get(id)?;
     let label = format!("tool_{id}");
@@ -776,10 +729,6 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let window = app.get_window("main")?;
     let url = tool.url.parse().ok()?;
     let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(url));
-    #[cfg(windows)]
-    {
-        builder = with_shared_environment(builder);
-    }
 
     // Session storage, per platform. Never both on macOS: wry prefers the custom
     // data store and ignores `data_directory`, so mixing them looks like isolated
@@ -927,8 +876,6 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
             LogicalSize::new(800.0, 600.0),
         )
         .ok()?;
-    #[cfg(windows)]
-    remember_environment(&webview);
     let _ = webview.set_zoom(load_layout(app).zoom);
     // A tool created after the preference changed must start with it, not with
     // the conservative default the script assumes.
