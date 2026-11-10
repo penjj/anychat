@@ -649,6 +649,10 @@ export default function App () {
         // The dismiss control must exist, be an icon-sized target, and sit at
         // the card's top-right. A text button there would satisfy "closes the
         // panel" while failing the actual requirement.
+        // The rendered label, not the state field: the panel used to show "v—"
+        // because the version was never put in the state it reads from, and a
+        // check on the field alone would have passed while the user saw a dash.
+        versionLabel: document.querySelector('#settings-view .version')?.textContent ?? null,
         closeBtn: (() => {
           const b = document.querySelector('#settings-view .icon-btn')
           if (!b) return null

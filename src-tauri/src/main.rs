@@ -634,6 +634,11 @@ struct StateDto {
     icon_count: usize,
     zoom: f64,
     theme: String,
+    /// The running build's version, from the bundle rather than from a config
+    /// read at startup: this is what the settings panel labels itself with, and
+    /// a version that disagreed with the installed app would make every
+    /// "up to date" message questionable.
+    version: String,
     /// Mirrors the saved preference so the checkbox reflects the setting that
     /// actually governs the next launch, not a transient toggle position.
     auto_check_update: bool,
@@ -1067,6 +1072,7 @@ fn state_dto(app: &tauri::AppHandle) -> StateDto {
         icon_count: TOOLS.iter().filter(|t| icon_cached(app, t.id).is_some()).count(),
         zoom: load_layout(app).zoom,
         theme: load_layout(app).theme,
+        version: app.package_info().version.to_string(),
         auto_check_update: load_layout(app).auto_check_update,
         update_ready: app.state::<App>().update_ready.lock().unwrap().clone(),
     }

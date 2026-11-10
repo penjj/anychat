@@ -73,6 +73,15 @@ if wait_for '^SETTINGS ' 20; then
   # A row wider than the card escapes the panel and gets clipped by the window,
   # which is exactly how the shortcut picker broke when it was a button row.
   # The settings panel is dismissed with an icon at the card's top-right.
+  # The panel must name a real version. It showed "v—" when the version was
+  # absent from the state it reads, and the fallback in the template hid that
+  # from every earlier check.
+  VL=$(echo "$LAST_SET" | sed -n 's/.*"versionLabel":"\([^"]*\)".*/\1/p')
+  case "$VL" in
+    v[0-9]*.[0-9]*) ok "settings-shows-version" 0 "$VL" ;;
+    *) ok "settings-shows-version" 1 "${VL:-no label}" ;;
+  esac
+
   # A square icon-sized target (not a text button), inset from the card's top
   # and right edges rather than sitting inline with the title.
   CB=$(echo "$LAST_SET" | sed -n 's/.*"closeBtn":{\([^}]*\)}.*/\1/p')
@@ -94,6 +103,7 @@ if wait_for '^SETTINGS ' 20; then
 else
   ok "settings-panel-visible" 1 "no SETTINGS line"
   ok "settings-card-width" 1 "no SETTINGS line"
+  ok "settings-shows-version" 1 "no SETTINGS line"
   ok "settings-close-icon-at-top-right" 1 "no SETTINGS line"
   ok "settings-no-overflow" 1 "no SETTINGS line"
 fi
