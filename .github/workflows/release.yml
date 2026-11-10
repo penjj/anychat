@@ -148,18 +148,29 @@ jobs:
               *win-arm64) TARGET=windows-aarch64 ;;
               *) continue ;;
             esac
-            for f in "$leg_dir"macos/*.app.tar.gz "$leg_dir"nsis/*.nsis.zip; do
+            # Windows signs the .exe.zip when the bundler emits one, and the
+            # bare installer otherwise. Both are accepted; a name ending in
+            # .nsis.zip would match nothing the bundler ever writes.
+            for f in "$leg_dir"macos/*.app.tar.gz \
+                     "$leg_dir"nsis/*.exe.zip "$leg_dir"nsis/*.exe \
+                     "$leg_dir"msi/*.msi.zip; do
               [ -e "$f" ] || continue
+              # Only files with a signature are updatable payloads; the bare
+              # installer beside a signed zip is the same build and would
+              # otherwise be picked up twice.
+              [ -e "$f.sig" ] || continue
               case "$f" in
                 *.app.tar.gz) SUFFIX=app.tar.gz ;;
-                *.nsis.zip)   SUFFIX=nsis.zip ;;
+                *.exe.zip)    SUFFIX=exe.zip ;;
+                *.exe)        SUFFIX=exe ;;
+                *.msi.zip)    SUFFIX=msi.zip ;;
+                *) continue ;;
               esac
-              base="${f%%.*}"
               dir=$(dirname "$f")
               # Rename the payload and its signature together, so the pair
               # stays adjacent for the manifest step.
               mv "$f" "$dir/AnyChat_${VERSION}_${TARGET}.${SUFFIX}"
-              [ -e "$f.sig" ] && mv "$f.sig" "$dir/AnyChat_${VERSION}_${TARGET}.${SUFFIX}.sig"
+              mv "$f.sig" "$dir/AnyChat_${VERSION}_${TARGET}.${SUFFIX}.sig"
             done
           done
           find artifacts -name 'AnyChat_*' -type f | sort

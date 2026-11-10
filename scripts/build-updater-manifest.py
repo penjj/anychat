@@ -17,15 +17,12 @@ import json
 import os
 import sys
 
-# artefact subdirectory -> platform key the updater looks up.
-# macOS ships a .app.tar.gz, Windows an NSIS .nsis.zip; both are what
-# tauri-plugin-updater expects to unpack and run.
-PATTERNS = [
-    ("macos", "darwin-aarch64", "*.app.tar.gz"),
-    ("macos", "darwin-x86_64", "*.app.tar.gz"),
-    ("nsis", "windows-x86_64", "*.nsis.zip"),
-    ("nsis", "windows-aarch64", "*.nsis.zip"),
-]
+# What the updater consumes per platform. macOS gets the .app tarball; Windows
+# gets the NSIS installer, either raw or as the .exe.zip the bundler emits. It
+# is *not* .nsis.zip -- the bundler never produces that name, and looking for it
+# silently dropped both Windows platforms from the first published manifest.
+MACOS_SUFFIX = ".app.tar.gz"
+WINDOWS_SUFFIXES = (".exe.zip", ".exe", ".msi.zip")
 
 # Directories produced by the matrix legs, keyed by the triple they built for.
 # The name carries the platform, so the same file name can appear four times.
@@ -39,7 +36,12 @@ LEG_TARGET = {
 
 def kind_label(path: str) -> str:
     """Suffix for the uploaded file, derived from the payload itself."""
-    return "app.tar.gz" if path.endswith(".app.tar.gz") else "nsis.zip"
+    if path.endswith(MACOS_SUFFIX):
+        return "app.tar.gz"
+    for suffix in WINDOWS_SUFFIXES:
+        if path.endswith(suffix):
+            return suffix.lstrip(".")
+    return "bin"
 
 
 def find_signed_artifact(leg_dir, kind):
@@ -47,15 +49,20 @@ def find_signed_artifact(leg_dir, kind):
     base = os.path.join(leg_dir, kind)
     if not os.path.isdir(base):
         return None, None
+    # Prefer the archive form when present: a single zipped installer keeps the
+    # signature covering exactly one file, and it is what the bundler signs.
+    candidates = []
     for name in sorted(os.listdir(base)):
         if name.endswith(".sig"):
             continue
-        # macOS tarball or Windows nsis zip, depending on the leg.
-        if name.endswith(".app.tar.gz") or name.endswith(".nsis.zip"):
-            payload = os.path.join(base, name)
-            sig = payload + ".sig"
-            if os.path.exists(sig):
-                return payload, sig
+        if name.endswith(MACOS_SUFFIX) or name.endswith(WINDOWS_SUFFIXES):
+            candidates.append(os.path.join(base, name))
+    # Longer suffixes first, so .exe.zip wins over a bare .exe in the same dir.
+    candidates.sort(key=lambda p: -len(p))
+    for payload in candidates:
+        sig = payload + ".sig"
+        if os.path.exists(sig):
+            return payload, sig
     return None, None
 
 
