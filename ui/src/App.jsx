@@ -299,6 +299,15 @@ export default function App () {
     return () => { if (unlisten) unlisten() }
   }, [])
 
+  // Enables colour transitions only after the first paint. Applied with a
+  // frame of delay so the initial palette lands without animating into place.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => document.documentElement.classList.add('themed'))
+    })
+    return () => cancelAnimationFrame(id)
+  }, [])
+
   useEffect(() => {
     if (!state.theme) return
     document.documentElement.setAttribute('data-theme', state.theme)
@@ -1056,7 +1065,7 @@ export default function App () {
             </div>
           )}
           <div className="actions">
-            <button className="primary" onClick={closeSettings}>完成</button>
+            <button className="primary" onClick={closeSettings}>关闭</button>
           </div>
         </div>
       </div>

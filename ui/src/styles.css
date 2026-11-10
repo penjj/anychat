@@ -100,6 +100,17 @@
 
 * { box-sizing: border-box; }
 
+/* Colour transitions for the theme swap, enabled one frame after mount by the
+   `themed` class in App.jsx. Without that guard the very first paint animates
+   from the default palette into the saved one and the window looks unloaded. */
+html.themed #app,
+html.themed #rail,
+html.themed .tool,
+html.themed .settings-card,
+html.themed .ctx-menu {
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
 /* The shell behaves like native chrome: no text selection, no I-beam, no
    drag-select. Fields and anything marked selectable opt back in below. */
 input, textarea, [contenteditable], .selectable {
@@ -137,6 +148,32 @@ html, body {
 }
 
 button { font: inherit; color: inherit; background: none; border: 0; cursor: default; }
+
+/* Shared interaction feel.
+   Pressing anything must look pressed: without an active state every click
+   reads as unacknowledged until the result arrives. The scale is small on
+   purpose -- this is chrome, not a toy. */
+button:active:not(:disabled) { transform: scale(0.97); }
+button { transition: background 120ms ease, color 120ms ease, transform 90ms ease, opacity 120ms ease; }
+
+/* Keyboard focus only: a ring on mouse clicks reads as a rendering artifact. */
+button:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Respect the system preference. Transitions are decorative; removing them
+   costs nothing and avoids discomfort for people who asked for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 /* ---------- rail ---------- */
 
@@ -217,6 +254,25 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .tool { opacity: 0.45; transition: opacity 0.12s ease; }
 .tool:hover { opacity: 0.75; }
 .tool.active { opacity: 1; background: var(--hover); }
+/* The selected row carries a short accent bar, so the active tool is findable
+   at a glance in a long list rather than only by its slightly brighter fill. */
+.tool { position: relative; }
+.tool.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 16px;
+  margin-top: -8px;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: bar-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes bar-in {
+  from { transform: scaleY(0.4); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
 .tool.active .name { color: var(--fg); font-weight: 500; }
 
 .mark {
@@ -622,10 +678,20 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   place-items: center;
   background: rgba(10, 10, 12, 0.86);
   z-index: 50;
+  /* Fades in rather than appearing: the panel covers the whole window, and a
+     hard cut reads as a flash. */
+  animation: fade-in 140ms ease;
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 #settings-view[hidden] { display: none; }
 
 .settings-card {
+  /* Enters with the backdrop so the panel does not materialise inside an
+     already-visible scrim. */
+  animation: card-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
   width: 340px;
   background: var(--elev);
   border: 1px solid var(--border);
@@ -636,6 +702,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   gap: 14px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
 }
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
 .settings-card h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .settings-card .row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
 .settings-card .row input[type="checkbox"] { accent-color: var(--accent); }
@@ -696,6 +767,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   background: rgba(24, 26, 34, 0.98);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(12px);
+  /* Grows out of the click point. transform-origin is set inline from the
+     pointer position, so the motion matches where the user actually clicked. */
+  animation: menu-in 110ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes menu-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: none; }
 }
 .ctx-menu button {
   display: block;

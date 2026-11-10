@@ -1541,6 +1541,27 @@ struct UpdateInfo {
     notes: String,
 }
 
+/// Builds an updater, honouring `ANYCHAT_UPDATE_ENDPOINT` when set.
+///
+/// The override exists so the whole flow -- check, download, verify, install,
+/// restart -- can be exercised against a locally served manifest without
+/// publishing a release. It is an explicit environment variable rather than a
+/// config field so it cannot be set by accident in a shipped build.
+fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let builder = app.updater_builder();
+    match std::env::var("ANYCHAT_UPDATE_ENDPOINT") {
+        Ok(endpoint) if !endpoint.is_empty() => {
+            let url = endpoint.parse().map_err(|e| format!("bad endpoint: {e}"))?;
+            builder
+                .endpoints(vec![url])
+                .map_err(|e| e.to_string())?
+                .build()
+                .map_err(|e| e.to_string())
+        }
+        _ => builder.build().map_err(|e| e.to_string()),
+    }
+}
+
 /// Looks for a newer release without downloading it.
 ///
 /// Returns `available: false` rather than an error when the check cannot be
@@ -1549,7 +1570,7 @@ struct UpdateInfo {
 #[tauri::command]
 async fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     let current = app.package_info().version.to_string();
-    let updater = match app.updater() {
+    let updater = match build_updater(&app) {
         Ok(u) => u,
         Err(e) => {
             return Ok(UpdateInfo {
@@ -1590,7 +1611,7 @@ async fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
 /// destroyed as part of it.
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let updater = build_updater(&app)?;
     let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
         return Err("没有可用更新".to_string());
     };
@@ -1882,6 +1903,63 @@ fn start_probe(app: tauri::AppHandle) {
                             Ok(layout) => println!("PROBE zoom={}", layout.zoom),
                             Err(e) => println!("PROBE zoom-err {e}"),
                         }
+                    }
+                    // Exercises the update path without the settings panel, so
+                    // the flow can be driven from a script.
+                    "check-update" => {
+                        let probe_app = h.clone();
+                        let handle = h.clone();
+                        tauri::async_runtime::spawn(async move {
+                            match check_update(probe_app).await {
+                                Ok(info) => println!(
+                                    "PROBE update available={} version={} current={} notes={}",
+                                    info.available, info.version, info.current, info.notes
+                                ),
+                                Err(e) => println!("PROBE update-err {e}"),
+                            }
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                            drop(handle);
+                        });
+                    }
+                    // Downloads and verifies without installing: proves the
+                    // signature accepts the payload while leaving the running
+                    // bundle untouched, which is what a smoke test needs.
+                    "download-update" => {
+                        let probe_app = h.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let result = async {
+                                let updater = build_updater(&probe_app)?;
+                                let update = updater
+                                    .check()
+                                    .await
+                                    .map_err(|e| e.to_string())?
+                                    .ok_or_else(|| "no update".to_string())?;
+                                let version = update.version.clone();
+                                let bytes = update
+                                    .download(|_chunk, _total| {}, || {})
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                                Ok::<_, String>((version, bytes.len()))
+                            }
+                            .await;
+                            match result {
+                                Ok((v, n)) => println!(
+                                    "PROBE download-ok version={v} bytes={n} signature=valid"
+                                ),
+                                Err(e) => println!("PROBE download-err {e}"),
+                            }
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                        });
+                    }
+                    "install-update" => {
+                        let probe_app = h.clone();
+                        tauri::async_runtime::spawn(async move {
+                            match install_update(probe_app).await {
+                                Ok(()) => println!("PROBE install started"),
+                                Err(e) => println!("PROBE install-err {e}"),
+                            }
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                        });
                     }
                     "quit" => { h.exit(0); }
                     other => println!("PROBE unknown {other}"),
