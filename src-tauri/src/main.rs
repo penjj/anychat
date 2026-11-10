@@ -700,6 +700,19 @@ fn shared_profile_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// A private user-data directory for the splash window on Windows.
+///
+/// The rail keeps Tauri's default directory and the splash gets this one, so
+/// the two webviews created during `setup` never open the same one. They are
+/// the only pair that exists before the event loop runs, which is why only they
+/// need separating.
+#[cfg(windows)]
+fn splash_profile_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join("anychat-splash-profile");
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
 /// The one WKWebsiteDataStore every tool shares.
 ///
 /// This used to be hashed per tool, which gave each its own cookie jar. The
@@ -1100,6 +1113,20 @@ fn build_splash(app: &tauri::AppHandle, monitor: Option<Monitor>) -> tauri::Resu
     // WKWebView. A child webview does not inherit the window's transparency, so
     // without this the animation sits on a solid white sheet no matter how clear
     // the window itself is.
+    // Its own user-data directory, not the shared one. On Windows a webview
+    // created during `setup` cannot join an existing environment: joining goes
+    // through `with_webview`, which posts to the event loop, and the event loop
+    // is not running yet. Two webviews over one directory then fail with
+    // ERROR_BUSY, which is the white screen. The splash shares nothing with
+    // anyone -- no cookies, no storage, no sign-in -- so a private directory
+    // costs nothing and removes the conflict.
+    #[cfg(windows)]
+    let webview_builder = WebviewBuilder::new(
+        SPLASH_LABEL,
+        WebviewUrl::App("splash.html".into()),
+    )
+    .data_directory(splash_profile_dir());
+    #[cfg(not(windows))]
     let webview_builder = WebviewBuilder::new(SPLASH_LABEL, WebviewUrl::App("splash.html".into()))
         .background_color(tauri::window::Color(0, 0, 0, 0))
         // Belt and braces: the stylesheet already clears every layer, but the
@@ -3298,11 +3325,17 @@ fn main() {
 
             let rail = WebviewBuilder::new(RAIL_LABEL, WebviewUrl::App("index.html".into()))
                 .initialization_script("window.__ANYCHAT__ = { hidden: true };");
-            window.add_child(
+            let rail = window.add_child(
                 rail,
                 LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(980.0, 760.0),
             )?;
+            // The rail is the first webview in the process, so it creates the
+            // WebView2 environment every later one has to join. See the Windows
+            // note on `win_env`: a second environment over the same user-data
+            // directory fails with ERROR_BUSY, which is the white screen.
+            #[cfg(windows)]
+            remember_environment(&rail);
 
             apply_rail_width(&handle, rail_width(&handle));
             // Icons are I/O; start them only after the window and rail exist.
