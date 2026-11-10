@@ -2622,15 +2622,32 @@ fn run_probe_command(h: tauri::AppHandle, cmd: String) {
                                 if let Err(e) = &apply {
                                     println!("PROBE resize-set-err {e}");
                                 }
-                                std::thread::sleep(std::time::Duration::from_millis(500));
-                                // Report what the window actually became, not what
-                                // was requested: a hidden or constrained window can
-                                // silently ignore set_size, which made the resize
-                                // check fail with a stale geometry reading.
-                                let got = w
-                                    .inner_size()
-                                    .map(|v| format!("{}x{}", v.width, v.height))
-                                    .unwrap_or_else(|_| "?".into());
+                                // Wait for the window to actually become the
+                                // requested size. `set_size` is asynchronous on
+                                // macOS: reading `inner_size` straight after it
+                                // returns the size from *before* this call, so
+                                // every report was one resize behind -- asking
+                                // for 660 reported 820, asking for 980 reported
+                                // 660. That lag is what made the resize check
+                                // compare two identical, stale numbers.
+                                let want = (parts[0], parts[1]);
+                                let mut got = String::new();
+                                for _ in 0..40 {
+                                    let now = w.inner_size().ok();
+                                    let hit = now
+                                        .map(|v| {
+                                            let (cw, ch) = (v.width as f64, v.height as f64);
+                                            (cw - want.0).abs() <= 2.0 && (ch - want.1).abs() <= 2.0
+                                        })
+                                        .unwrap_or(false);
+                                    got = now
+                                        .map(|v| format!("{}x{}", v.width, v.height))
+                                        .unwrap_or_else(|| "?".into());
+                                    if hit {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                }
                                 let shown = w.is_visible().unwrap_or(false);
                                 println!(
                                     "PROBE resized={}x{} actual={got} visible={shown}",
