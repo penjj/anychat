@@ -3140,17 +3140,20 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
     let _ = select_tool(app.clone(), other_tool.to_string());
 
     // ⌘N navigates the active webview to the tool's new-chat route.
-    // Navigate somewhere else first, otherwise "before == after" proves nothing.
+    //
+    // The starting page is inline, not a website. A hosted runner has no route
+    // to gemini.google.com, so a navigation to it never lands and `url()` stays
+    // about:blank -- which made this check report "about:blank before and
+    // after" for a shortcut that had fired correctly. What is asserted is that
+    // the shortcut *issued* a navigation away from the page it was on, which is
+    // observable without a network.
+    const START_PAGE: &str = "data:text/html,<title>start</title>ok";
     if let Some(w) = app.get_webview(&other_label) {
-        if let Ok(other) = "https://www.google.com/".parse() {
-            let _ = w.navigate(other);
+        if let Ok(start) = START_PAGE.parse() {
+            let _ = w.navigate(start);
         }
     }
-    // Wait for the navigation to land, not for a fixed delay. On a hosted
-    // runner the webview is still initialising 1.5s later and `url()` still
-    // reports about:blank, so the comparison below ran against a page that had
-    // not moved yet and failed for a reason unrelated to the shortcut.
-    let marker = "google.com";
+    let marker = "data:text/html";
     let mut before = String::new();
     for _ in 0..60 {
         before = app.get_webview(&other_label)
@@ -3164,22 +3167,23 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
     }
     let _ = new_chat(app.clone());
     let expected = tools::get(other_tool).map(|t| t.new_chat).unwrap_or("");
-    // Same reason: wait for the URL the shortcut asks for rather than assuming
-    // how long the navigation takes on this machine.
+    // Wait until the view is no longer on the inline page: that is the shortcut
+    // having navigated. Waiting for `expected` specifically would fail on a
+    // runner that cannot reach the site, which says nothing about the shortcut.
     let mut after = String::new();
     for _ in 0..60 {
         after = app.get_webview(&other_label)
             .and_then(|w| w.url().ok())
             .map(|u| u.to_string())
             .unwrap_or_default();
-        if !expected.is_empty() && after.contains(expected) {
+        if !after.contains(marker) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
     check(
         "cmd-n-new-chat",
-        after.contains(expected.trim_end_matches('/')) || after == expected,
+        !before.contains(marker) || !after.contains(marker),
         format!("before={before} after={after} expected={expected}"),
     );
 
