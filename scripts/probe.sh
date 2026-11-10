@@ -31,8 +31,10 @@ APP=$!
 # wedged process on Windows can make even `wait` never return, and a gate that
 # hangs is worse than one that fails: it burns the job's whole budget and
 # reports nothing. The watchdog turns that into a normal failure with output.
-( sleep "${PROBE_DEADLINE:-600}"; echo "PROBE deadline reached" >> "$LOG"; kill -9 "$APP" 2>/dev/null ) >/dev/null 2>&1 &
-WATCHDOG=$!
+( sleep "${PROBE_DEADLINE:-600}"; echo "PROBE deadline reached" >> "$LOG"; kill -9 "$APP" 2>/dev/null ) >/dev/null 2>&1 & WATCHDOG=$!
+# bash announces a killed background job on stderr; the watchdog is expected to
+# be killed on every normal exit, so silence that one notification.
+disown "$WATCHDOG" 2>/dev/null || true
 
 
 say () { printf '%s\n' "$1" >> "$CMD_FILE"; sleep 1.2; }
