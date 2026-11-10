@@ -3101,6 +3101,11 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
     if let Some(w) = &win {
         let _ = w.show();
     }
+    // The tool that already exists was created while the window was hidden.
+    // Revealing it is the first moment its browser will load anything, so the
+    // same repair the app performs on summon applies here.
+    #[cfg(not(target_os = "macos"))]
+    resume_empty_content_views(app);
 
     let handled = select_tool(app.clone(), other_tool.to_string());
     check("select-tool", handled.is_ok(), format!("{handled:?}"));
