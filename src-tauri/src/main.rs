@@ -708,7 +708,18 @@ fn shared_profile_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 /// need separating.
 #[cfg(windows)]
 fn splash_profile_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join("anychat-splash-profile");
+    // Unique per process, not one shared name. The gate launches the app twice
+    // in a row -- once to time the handover, once to run the checks -- and
+    // kills the first between them. A fixed directory then still looks busy to
+    // the second launch and it fails exactly like the collision this avoids.
+    let dir = std::env::temp_dir().join(format!(
+        "anychat-splash-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     std::fs::create_dir_all(&dir).ok();
     dir
 }
@@ -3031,11 +3042,22 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
 
     // Rail DOM is reported by the rail itself through IPC: the only way to prove
     // both the DOM and the command channel in one shot.
+    // Wait for a report that describes a rendered rail, not merely for the
+    // first report. The page reports as soon as it lays out, which can be
+    // before the tool list has arrived from the host: that snapshot says
+    // `tools:0`, and taking it would report a correct UI as a broken one. Every
+    // later state change provokes another report, so this converges.
     let mut dom = String::new();
-    for _ in 0..20 {
+    for _ in 0..60 {
         if let Some(v) = app.state::<App>().rail.lock().unwrap().clone() {
+            let has_tools = serde_json::from_str::<serde_json::Value>(&v)
+                .ok()
+                .and_then(|p| p.get("tools").and_then(|t| t.as_u64()))
+                .is_some_and(|n| n > 0);
             dom = v;
-            break;
+            if has_tools {
+                break;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
