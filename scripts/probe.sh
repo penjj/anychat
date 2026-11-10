@@ -25,7 +25,26 @@ wait_for () { # pattern, timeout_s
   return 1
 }
 
-cleanup () { echo "quit" >&3 2>/dev/null || true; sleep 0.5; kill $APP 2>/dev/null || true; rm -f "$FIFO"; }
+# Wait for the app to actually exit. A plain `kill` only asks: the process has
+# to tear down its webviews and unregister a global shortcut first, and if the
+# script returns before that finishes the app is orphaned and keeps running
+# invisibly -- which is what left a stray AnyChat on screen after a gate run.
+cleanup () {
+  echo "quit" >&3 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$APP" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill "$APP" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$APP" 2>/dev/null || break
+    sleep 0.2
+  done
+  # Last resort: nothing left to clean up gracefully, so do not leave it behind.
+  kill -9 "$APP" 2>/dev/null || true
+  wait "$APP" 2>/dev/null || true
+  rm -f "$FIFO"
+}
 trap cleanup EXIT
 
 PASS=0; FAIL=0
