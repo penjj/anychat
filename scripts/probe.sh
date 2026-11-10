@@ -9,13 +9,25 @@ cd "$(dirname "$0")/../src-tauri"
 
 export ANYCHAT_DATA_DIR="$(mktemp -d)/anychat-probe"
 LOG=$(mktemp)
-FIFO=$(mktemp -u); mkfifo "$FIFO"
 
-ANYCHAT_PROBE=1 ./target/debug/anychat < "$FIFO" > "$LOG" 2>&1 &
+# Commands reach the app through a file it tails, not stdin.
+#
+# A named pipe (`mkfifo`) does not exist on Windows and this gate runs there; a
+# plain file on stdin is worse, because the app reads to EOF and exits. The file
+# is append-only and the app remembers its read offset, so `say` needs no
+# handshake and the order of writes is the order of execution on every platform.
+CMD_FILE=$(mktemp)
+: > "$CMD_FILE"
+
+# Windows cargo names the binary with .exe; a bare path there is a file-not-found
+# that reads like a broken build.
+APP_BIN=./target/debug/anychat
+[ -f "$APP_BIN.exe" ] && APP_BIN="$APP_BIN.exe"
+
+ANYCHAT_PROBE=1 ANYCHAT_PROBE_FILE="$CMD_FILE" "$APP_BIN" > "$LOG" 2>&1 &
 APP=$!
-exec 3> "$FIFO"
 
-say () { echo "$1" >&3; sleep 1.2; }
+say () { printf '%s\n' "$1" >> "$CMD_FILE"; sleep 1.2; }
 wait_for () { # pattern, timeout_s
   local pat="$1" limit="${2:-20}" i=0
   while [ $i -lt $((limit * 10)) ]; do
@@ -30,7 +42,7 @@ wait_for () { # pattern, timeout_s
 # script returns before that finishes the app is orphaned and keeps running
 # invisibly -- which is what left a stray AnyChat on screen after a gate run.
 cleanup () {
-  echo "quit" >&3 2>/dev/null || true
+  printf 'quit\n' >> "$CMD_FILE" 2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     kill -0 "$APP" 2>/dev/null || break
     sleep 0.2
@@ -43,7 +55,7 @@ cleanup () {
   # Last resort: nothing left to clean up gracefully, so do not leave it behind.
   kill -9 "$APP" 2>/dev/null || true
   wait "$APP" 2>/dev/null || true
-  rm -f "$FIFO"
+  rm -f "$CMD_FILE"
 }
 trap cleanup EXIT
 
@@ -158,7 +170,17 @@ wait_for '^RAIL ' 10
 BEFORE_RAIL=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
 BEFORE_SLOT=$(echo "$BEFORE_RAIL" | sed -n 's/.*"slot":{"w":\([0-9]*\),[^}]*}.*/\1/p')
 BEFORE_RAIL_W=$(echo "$BEFORE_RAIL" | sed -n 's/.*"railWidth":\([0-9]*\).*/\1/p')
-say "resize 1300 900"
+# Shrink, not grow. A hosted runner's virtual display can be smaller than the
+# 1300x900 this used to ask for, so `set_size` was clamped to the same width and
+# the content legitimately did not move -- a green check on a developer machine
+# and a red one in CI, for a reason that says nothing about the app. Shrinking is
+# available on every display.
+CUR_W=$(echo "$BEFORE_RAIL" | sed -n 's/.*"win":{"w":\([0-9]*\).*/\1/p')
+# Relative to the window, so it shrinks whatever the display allows; the floor
+# keeps it above the app's own minimum, below which set_size is refused.
+SMALL_W=$(( CUR_W - 160 ))
+[ "$SMALL_W" -lt 560 ] && SMALL_W=560
+say "resize $SMALL_W 700"
 # Wait for the rail to report the new geometry. A fixed sleep read the last
 # pre-resize line whenever the window took longer than it to settle, which made
 # this check fail with before and after both equal -- looking like the content
@@ -174,10 +196,10 @@ done
 AFTER=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
 AFTER_SLOT=$(echo "$AFTER" | sed -n 's/.*"slot":{"w":\([0-9]*\),[^}]*}.*/\1/p')
 AFTER_RAIL_W=$(echo "$AFTER" | sed -n 's/.*"railWidth":\([0-9]*\).*/\1/p')
-if [ -n "$BEFORE_SLOT" ] && [ -n "$AFTER_SLOT" ] && [ "$AFTER_SLOT" -gt "$BEFORE_SLOT" ]; then
+if [ -n "$BEFORE_SLOT" ] && [ -n "$AFTER_SLOT" ] && [ "$AFTER_SLOT" -ne "$BEFORE_SLOT" ]; then
   ok "window-resize-moves-content" 0 "slot ${BEFORE_SLOT} -> ${AFTER_SLOT}"
 else
-  ok "window-resize-moves-content" 1 "before=${BEFORE_SLOT:-none} after=${AFTER_SLOT:-none}"
+  ok "window-resize-moves-content" 1 "before=${BEFORE_SLOT:-none} after=${AFTER_SLOT:-none} (content did not follow the window)"
 fi
 # The rail keeps whatever width the user chose; the window does not stretch it.
 if [ -n "$AFTER_RAIL_W" ] && [ "$AFTER_RAIL_W" = "$BEFORE_RAIL_W" ]; then

@@ -2336,20 +2336,10 @@ fn run_persist_test(app: &tauri::AppHandle, write: bool) {
 
 /// Live probe: keeps the event loop free, prints every rail/settings report, and
 /// executes gate commands from stdin. Used by scripts/probe.sh.
-fn start_probe(app: tauri::AppHandle) {
-    use std::io::BufRead;
-
-    let stdin = std::io::stdin();
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        for line in stdin.lock().lines().flatten() {
-            let cmd = line.trim().to_string();
-            if cmd.is_empty() {
-                continue;
-            }
-            let h = handle.clone();
-            let _ = handle.run_on_main_thread(move || {
-                println!("PROBE tick {cmd}");
+/// Runs one probe command. Shared by both input paths so a command behaves
+/// identically whether it arrived on stdin or through the tailed file.
+fn run_probe_command(h: tauri::AppHandle, cmd: String) {
+    println!("PROBE tick {cmd}");
                 match cmd.as_str() {
                     "settings.open" => { let _ = open_settings(h.clone()); }
                     "settings.close" => { let _ = close_settings(h.clone()); }
@@ -2593,6 +2583,64 @@ fn start_probe(app: tauri::AppHandle) {
                     other => println!("PROBE unknown {other}"),
                 }
                 let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+}
+
+fn start_probe(app: tauri::AppHandle) {
+    use std::io::BufRead;
+
+    let handle = app.clone();
+
+    // Commands may arrive through a file instead of stdin.
+    //
+    // Git Bash on Windows has no `mkfifo`, and feeding a plain file to stdin is
+    // broken in a subtler way: the app reads to EOF and exits, so the driver
+    // cannot write the next command. Tailing an append-only file keeps the
+    // driver dumb and the ordering exact, and it works on every platform the
+    // gate runs on.
+    if let Ok(path) = std::env::var("ANYCHAT_PROBE_FILE") {
+        std::thread::spawn(move || {
+            let mut offset: u64 = 0;
+            let mut pending = String::new();
+            loop {
+                // Read only what was appended since the last pass. Re-reading
+                // the whole file would replay every command forever.
+                if let Ok(mut f) = std::fs::File::open(&path) {
+                    use std::io::{Read, Seek, SeekFrom};
+                    if f.seek(SeekFrom::Start(offset)).is_ok() {
+                        let mut buf = String::new();
+                        if let Ok(n) = f.read_to_string(&mut buf) {
+                            offset += n as u64;
+                            pending.push_str(&buf);
+                        }
+                    }
+                }
+                while let Some(idx) = pending.find('\n') {
+                    let line = pending[..idx].trim().to_string();
+                    pending.drain(..=idx);
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let h = handle.clone();
+                    let _ = handle.run_on_main_thread(move || run_probe_command(h, line));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        });
+        return;
+    }
+
+    let stdin = std::io::stdin();
+    std::thread::spawn(move || {
+        for line in stdin.lock().lines().flatten() {
+            let cmd = line.trim().to_string();
+            if cmd.is_empty() {
+                continue;
+            }
+            let h = handle.clone();
+            let _ = handle.run_on_main_thread(move || {
+                println!("PROBE tick {cmd}");
+                run_probe_command(h, cmd);
             });
         }
         // stdin closed: keep running until told to quit.

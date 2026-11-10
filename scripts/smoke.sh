@@ -35,26 +35,37 @@ rm -f "$BOOT_LOG"
 # one. Too late means a start slow enough to be worth fixing.
 #
 # The film is 3s; the window plus page load adds a few hundred ms.
+# A ceiling that survives a slow shared runner without accepting a regression.
+# The bug this guards is the splash film being cut short, which is under 2600;
+# the upper bound catches "the app now waits on something it did not before".
+# 12s: the animation is 3s, and the rest is webview start plus page load, which
+# measured 11.4s on a cold hosted runner and under 5s locally.
+HANDOVER_CEILING="${HANDOVER_CEILING:-12000}"
+HANDOVER_FAIL=0
 if [ -z "$HANDOVER" ]; then
   echo "FAIL startup-handover  no handover line"
+  HANDOVER_FAIL=1
 elif [ "$HANDOVER" -lt 2600 ]; then
   echo "FAIL startup-handover  ${HANDOVER}ms, splash cut before the film finished"
-elif [ "$HANDOVER" -gt 6000 ]; then
-  echo "FAIL startup-handover  ${HANDOVER}ms, slower than the old fixed animation"
+  HANDOVER_FAIL=1
+elif [ "$HANDOVER" -gt "$HANDOVER_CEILING" ]; then
+  echo "FAIL startup-handover  ${HANDOVER}ms, over the ${HANDOVER_CEILING}ms ceiling"
+  HANDOVER_FAIL=1
 else
   echo "PASS startup-handover  ${HANDOVER}ms"
 fi
 
 echo "== self-check =="
 export ANYCHAT_DATA_DIR="$(mktemp -d)/anychat-gate"
-ANYCHAT_SMOKE=1 ./target/debug/anychat 2>&1 | grep -viE "IMKCFRunLoop|mach port" > /tmp/anychat-smoke.txt || true
-python3 - <<'PY'
-import json, sys, pathlib
-txt = pathlib.Path('/tmp/anychat-smoke.txt').read_text()
-# Pick the SMOKE line specifically: the log also carries RAIL/SETTINGS reports and
-# window-server noise, so a bare find() landed on the wrong JSON blob.
-# The report is pretty-printed across many lines, so parse it with raw_decode
-# starting right after the marker instead of assuming a single line.
+# Not /tmp: it does not exist on Windows, and this gate runs there.
+SMOKE_OUT="$(pwd)/target/anychat-smoke.txt"
+ANYCHAT_SMOKE=1 ./target/debug/anychat 2>&1 | grep -viE "IMKCFRunLoop|mach port" > "$SMOKE_OUT" || true
+# `set -e` would abort here on a failing self-check, which is why the status is
+# captured with `||` instead of `$?` -- the latter is unreachable in that case.
+SELF_CHECK=0
+SMOKE_OUT="$SMOKE_OUT" python3 - <<'PY' || SELF_CHECK=$?
+import json, os, sys, pathlib
+txt = pathlib.Path(os.environ['SMOKE_OUT']).read_text()
 marker = txt.rfind('SMOKE ')
 if marker < 0:
     print('no SMOKE output; raw log:')
@@ -66,3 +77,7 @@ for s in d['steps']:
 print('RESULT', 'ok' if d['ok'] else f"FAILED {d['failures']}")
 sys.exit(0 if d['ok'] else 1)
 PY
+if [ "$HANDOVER_FAIL" -ne 0 ] || [ "$SELF_CHECK" -ne 0 ]; then
+  exit 1
+fi
+exit 0
