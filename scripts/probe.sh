@@ -236,7 +236,14 @@ SMALL_W=$(( CUR_W - 160 ))
 # Wait for the window to actually be the new width, as the page reports it. The
 # app cannot do this wait itself: the command runs on its main thread, and
 # blocking there stops the resize it is waiting for.
-say "resize $SMALL_W 700"
+# Same height as now, only narrower. Growing the window vertically is refused by
+# a display that has no room for it, and macOS applies a size as a unit: the
+# refused height took the width with it, so the width never changed either and
+# the check reported "content did not follow the window" for a resize that
+# never happened.
+CUR_H=$(rail_field "$BEFORE_RAIL" win.h)
+[ -z "${CUR_H:-}" ] && CUR_H=600
+say "resize $SMALL_W $CUR_H"
 for _ in $(seq 1 240); do
   W=$(rail_field "$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')" win.w)
   if [ -n "${W:-}" ] && [ "$W" != "$CUR_W" ]; then break; fi
