@@ -1,3 +1,10 @@
+// Without this the release build links as a console application on Windows, so
+// a black terminal window opens alongside the app on every launch -- a
+// subsystem flag cannot be set from the bundle config, only from the crate
+// root. Debug builds keep the console on purpose: that is where the
+// diagnostics go.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -42,6 +49,14 @@ struct App {
     rail: std::sync::Mutex<Option<String>>,
     /// Last DOM report from the settings overlay.
     settings_dom: std::sync::Mutex<Option<String>>,
+    /// Last self-report each tool page made about whether it actually painted.
+    ///
+    /// `Webview` exposes no visibility query, so the host cannot ask "is this
+    /// child view on screen". The page itself is the only witness: it reports a
+    /// rendered body, and the host pairs that with what it believes it showed.
+    /// A page that loaded but reports no paint is the white-screen case, and
+    /// nothing in the process would otherwise notice it.
+    paint: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// Whether the settings panel should be showing; the rail polls this on load.
     settings_open: std::sync::atomic::AtomicBool,
     /// Whether the active content webview is hidden behind the settings panel.
@@ -70,6 +85,10 @@ struct App {
     /// disk waiting for a relaunch. Shared with the rail so the banner reflects
     /// the real state rather than a copy that can drift.
     update_ready: std::sync::Mutex<Option<ReadyUpdate>>,
+    /// The rail has mounted and laid itself out. Recorded so handover can tell
+    /// "the app is usable" from "the launch film has finished" -- the splash
+    /// ends on the second, and the first only means it will not be wasted.
+    ready: std::sync::atomic::AtomicBool,
     /// Verified payload from the background download. Kept here, not on disk,
     /// so a relaunch that the user dismisses leaves nothing stale to clean up.
     pending_bytes: std::sync::Mutex<Option<Vec<u8>>>,
@@ -701,6 +720,53 @@ fn store_id(_id: &str) -> [u8; 16] {
     *b"anychat-shared01"
 }
 
+/// The single WebView2 environment every child webview shares on Windows.
+///
+/// Each `add_child` without this creates its own `ICoreWebView2Environment`,
+/// and several environments pointed at one user-data folder contend for its
+/// lock. The loser initialises to a blank page -- the "only one chat works,
+/// the rest are white" symptom -- and, worse, separate environments put the
+/// children in separate render processes, so a child can end up composited
+/// above the rail page that is supposed to cover it. Sharing one environment
+/// gives one user-data folder, one browser process and a coherent z-order.
+///
+/// macOS is unaffected: `data_store_identifier` already shares a store there,
+/// and WKWebView has no equivalent environment object.
+#[cfg(windows)]
+fn shared_environment() -> &'static std::sync::Mutex<Option<
+    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
+>> {
+    static ENV: std::sync::OnceLock<std::sync::Mutex<Option<
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
+    >>> = std::sync::OnceLock::new();
+    ENV.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Records the environment a webview was built with, so the next one can reuse
+/// it. Called for every child; the first one to run is the one that creates it.
+#[cfg(windows)]
+fn remember_environment(webview: &Webview) {
+    if let Ok(mut slot) = shared_environment().lock() {
+        if slot.is_none() {
+            slot.replace(webview.environment());
+        }
+    }
+}
+
+/// Attaches the shared environment to a builder when one is known.
+///
+/// The very first child has nothing to reuse and must create the environment,
+/// so it goes without; every later one joins it.
+#[cfg(windows)]
+fn with_shared_environment(mut builder: WebviewBuilder<'_>) -> WebviewBuilder<'_> {
+    if let Ok(slot) = shared_environment().lock() {
+        if let Some(env) = slot.as_ref() {
+            builder = builder.with_environment(env.clone());
+        }
+    }
+    builder
+}
+
 fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let tool = tools::get(id)?;
     let label = format!("tool_{id}");
@@ -710,6 +776,10 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let window = app.get_window("main")?;
     let url = tool.url.parse().ok()?;
     let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(url));
+    #[cfg(windows)]
+    {
+        builder = with_shared_environment(builder);
+    }
 
     // Session storage, per platform. Never both on macOS: wry prefers the custom
     // data store and ignores `data_directory`, so mixing them looks like isolated
@@ -722,7 +792,14 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     // Give the webview the same identity a real Safari presents. The WKWebView
     // default UA drops the "Version/x Safari/y" tail, which sites can spot; this
     // is honest -- we are a Safari engine -- and avoids gratuitous mismatches.
-    builder = builder.user_agent(safari_user_agent());
+    // Diagnostic override: a blank UA means "use the engine default", which is
+    // the fastest way to tell a site that refuses Safari-UA script from a view
+    // that never loaded at all.
+    if std::env::var("ANYCHAT_DEFAULT_UA").is_ok() {
+        // leave the default
+    } else {
+        builder = builder.user_agent(safari_user_agent());
+    }
 
     // Login flows (Google, GitHub, Apple, …) open a popup via `window.open`.
     // Tauri denies those by default, so the button appeared to do nothing at
@@ -743,6 +820,51 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     // a chat must not navigate the chat away, while the site's own routes must
     // keep working. Same-registrable-domain links are left entirely alone, so
     // the SPA routing of every site is unaffected.
+    // Paint witness. `Webview` has no visibility query, so the only way to tell
+    // a loaded-but-blank page from a rendered one is to ask the document. The
+    // white-screen regression is exactly this: the view is on screen, the title
+    // loads, and nothing is painted because the compositor never attached it.
+    let paint_script = format!(
+        r#"(function () {{
+             var label = '{label}';
+             function painted() {{
+               var b = document.body;
+               if (!b) return {{ ok: false, why: 'no-body' }};
+               var text = (b.innerText || '').trim().length;
+               var kids = b.children ? b.children.length : 0;
+               var r = b.getBoundingClientRect();
+               return {{
+                 ok: kids > 0 && r.width > 0 && r.height > 0,
+                 why: 'kids=' + kids + ' text=' + text + ' w=' + Math.round(r.width) +
+                      ' h=' + Math.round(r.height),
+               }};
+             }}
+             function report() {{
+               var p = painted();
+               try {{
+                 window.__TAURI_INTERNALS__.invoke('tool_paint', {{
+                   label: label, painted: p.ok, detail: p.why,
+                 }});
+               }} catch (err) {{
+                 try {{
+                   window.__TAURI_INTERNALS__.invoke('tool_paint', {{
+                     label: label, painted: false,
+                     detail: 'invoke-failed ' + (err && err.message || err),
+                   }});
+                 }} catch (_) {{}}
+               }}
+             }}
+             // Report once the document has settled, and again after the load
+             // event so a page that paints late is not called blank too soon.
+             if (document.readyState === 'complete') report();
+             else window.addEventListener('load', report, {{ once: true }});
+             setTimeout(report, 2500);
+           }})();
+"#,
+        label = label
+    );
+    builder = builder.initialization_script(paint_script);
+
     builder = builder.initialization_script(
         r#"document.addEventListener('keydown', function (e) {
              if (!(e.metaKey || e.ctrlKey) || e.shiftKey) return;
@@ -805,11 +927,15 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
             LogicalSize::new(800.0, 600.0),
         )
         .ok()?;
+    #[cfg(windows)]
+    remember_environment(&webview);
     let _ = webview.set_zoom(load_layout(app).zoom);
     // A tool created after the preference changed must start with it, not with
     // the conservative default the script assumes.
     apply_external_links_to(app, &webview, &load_layout(app).external_links);
-    let _ = webview.hide();
+    // Not hidden here: a hidden WKWebView can stall its own load, and a heavy
+    // SPA that never finishes loading renders as a white page forever. The
+    // caller (`select_tool`) shows or hides it once it knows which case it is.
     Some(webview)
 }
 
@@ -904,10 +1030,14 @@ fn order_front_without_activating(_window: &tauri::Window) {}
 /// The clock has to begin before the first caller, or every measurement is
 /// relative to whenever it happened to be asked: the splash used to report
 /// "opening at 0ms" on a launch that had already taken hundreds.
+/// Anchor for every startup timestamp, started at the first line of main.
+///
+/// Lazily initialised on first read would anchor on the reader, not on the
+/// process: the splash's own "opening at 0ms" line was measuring itself.
+static BOOT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 fn boot_ms() -> u128 {
-    use std::sync::OnceLock;
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_millis()
+    BOOT.get_or_init(std::time::Instant::now).elapsed().as_millis()
 }
 
 fn build_splash(app: &tauri::AppHandle, monitor: Option<Monitor>) -> tauri::Result<()> {
@@ -1025,8 +1155,34 @@ fn hand_over_from_splash(app: &tauri::AppHandle) {
         return;
     }
     eprintln!("anychat: handing over at {}ms", boot_ms());
+    if let Some(w) = app.get_window("main") {
+        if let (Ok(p), Ok(sz), Ok(sc)) = (w.outer_position(), w.outer_size(), w.scale_factor()) {
+            eprintln!(
+                "anychat: window at {:.0},{:.0} size {:.0}x{:.0}",
+                p.x as f64 / sc, p.y as f64 / sc,
+                sz.width as f64 / sc, sz.height as f64 / sc
+            );
+            if let Ok(ms) = w.available_monitors() {
+                for m in &ms {
+                    let mp = m.position();
+                    let msz = m.size();
+                    eprintln!(
+                        "anychat: monitor at {:.0},{:.0} size {:.0}x{:.0}",
+                        mp.x as f64 / sc, mp.y as f64 / sc,
+                        msz.width as f64 / sc, msz.height as f64 / sc
+                    );
+                }
+            }
+        }
+    }
     if let Some(splash) = app.get_window(SPLASH_LABEL) {
         let _ = splash.close();
+    }
+    // A window that starts off-screen would be revealed nowhere. The clamp is
+    // applied here as well as in show_window because this path reveals the
+    // window directly, without going through that function.
+    if let Some(window) = app.get_window("main") {
+        clamp_to_screens(&window);
     }
     if std::env::var("ANYCHAT_DEMO_SHOW").is_ok()
         || app.state::<App>().wants_visible.load(SeqCst)
@@ -1035,11 +1191,76 @@ fn hand_over_from_splash(app: &tauri::AppHandle) {
     }
 }
 
-/// Called by the splash when its animation ends, as a fallback for a start slow
-/// enough that the rail was not ready first.
+/// Called by the splash when its animation ends. This is now the only thing
+/// that ends the launch, so the film always plays in full.
 #[tauri::command]
 fn splash_done(app: tauri::AppHandle) {
+    eprintln!(
+        "anychat: splash finished at {}ms (rail ready={})",
+        boot_ms(),
+        app.state::<App>()
+            .ready
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
     hand_over_from_splash(&app);
+}
+
+/// Pulls the window back onto a visible screen if it is fully or mostly off.
+///
+/// Dragging is handled by the OS (`startDragging`), which happily lets a window
+/// be moved past the edge until nothing is grabbable. The window then still
+/// shows on summon, so it looks alive while being unreachable -- and nothing in
+/// the app could bring it back, because every control lives inside it.
+///
+/// Only acted on when no usable part is on screen: a window deliberately parked
+/// half over an edge must stay where the user put it.
+fn clamp_to_screens(window: &tauri::Window) {
+    let Ok(pos) = window.outer_position() else { return };
+    let Ok(size) = window.outer_size() else { return };
+    let Ok(scale) = window.scale_factor() else { return };
+    let Ok(monitors) = window.available_monitors() else { return };
+    if monitors.is_empty() {
+        return;
+    }
+
+    let wx = pos.x as f64 / scale;
+    let wy = pos.y as f64 / scale;
+    let ww = size.width as f64 / scale;
+    let wh = size.height as f64 / scale;
+    // A sliver is not "visible": the pointer has to be able to land on the
+    // header, and a few pixels at the edge is not a target.
+    const MIN_VISIBLE: f64 = 80.0;
+
+    let on_any = monitors.iter().any(|m| {
+        let mp = m.position();
+        let ms = m.size();
+        let mx = mp.x as f64 / scale;
+        let my = mp.y as f64 / scale;
+        let mw = ms.width as f64 / scale;
+        let mh = ms.height as f64 / scale;
+        let vis_w = (wx + ww).min(mx + mw) - wx.max(mx);
+        let vis_h = (wy + wh).min(my + mh) - wy.max(my);
+        vis_w >= MIN_VISIBLE && vis_h >= MIN_VISIBLE
+    });
+    if on_any {
+        return;
+    }
+
+    // Centre on the primary monitor. Not the nearest edge: the point is to
+    // guarantee every control is reachable, and an edge nudge can leave the
+    // window still mostly clipped on a small display.
+    let Some(primary) = monitors.first() else { return };
+    let mp = primary.position();
+    let ms = primary.size();
+    let mx = mp.x as f64 / scale;
+    let my = mp.y as f64 / scale;
+    let mw = ms.width as f64 / scale;
+    let mh = ms.height as f64 / scale;
+
+    let x = mx + ((mw - ww) / 2.0).max(0.0);
+    let y = my + ((mh - wh) / 2.0).max(0.0);
+    eprintln!("anychat: window was off-screen at {wx:.0},{wy:.0}; recentring to {x:.0},{y:.0}");
+    let _ = window.set_position(LogicalPosition::new(x, y));
 }
 
 fn show_window(app: &tauri::AppHandle) {
@@ -1048,6 +1269,9 @@ fn show_window(app: &tauri::AppHandle) {
             emit_state(app);
             return;
         }
+        // Before revealing it: a window summoned at an off-screen coordinate is
+        // indistinguishable from one that did not appear at all.
+        clamp_to_screens(&window);
         // Pin state is the user's choice and survives a summon. It used to be
         // cleared here, which made the pin button look broken: every ⌥Space
         // quietly undid it. Restore the persisted value instead.
@@ -1091,16 +1315,34 @@ fn list_tools() -> Vec<Tool> {
     TOOLS.to_vec()
 }
 
+/// Records a tool page's own claim about whether it painted.
+///
+/// Reporting the *label* rather than trusting the active id matters: after a
+/// switch the previous page can be the last one to speak, and attributing its
+/// report to the new tool would hide exactly the failure worth catching.
+#[tauri::command]
+fn tool_paint(app: tauri::AppHandle, label: String, painted: bool, detail: String) {
+    println!("PAINT {label} {painted} {detail}");
+    if let Ok(mut map) = app.state::<App>().paint.lock() {
+        map.insert(label, format!("{painted} {detail}"));
+    }
+}
+
 /// The rail reports what it actually rendered, so the gate can assert the DOM.
 #[tauri::command]
 fn rail_ready(app: tauri::AppHandle, report: String) {
     println!("RAIL {report}");
     *app.state::<App>().rail.lock().unwrap() = Some(report);
-    // The rail is mounted and laid out, which is the earliest point the window
-    // can be handed over without the user watching it assemble. Release the
-    // splash now rather than after a fixed animation: the film is the reason a
-    // launch felt like five seconds when the app itself was ready in one.
-    hand_over_from_splash(&app);
+    // Readiness alone does not end the splash. It used to, which killed the
+    // animation about a fifth of the way in and left the screen empty: the
+    // window is hidden until handover, so closing the splash early shows
+    // nothing at all rather than something sooner. The film is deliberately
+    // three seconds; what it must never do is outlast readiness by much, so
+    // this only records that the app is ready and lets the splash's own end
+    // decide.
+    app.state::<App>()
+        .ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -1413,19 +1655,45 @@ fn resize_window(app: tauri::AppHandle, corner: String, dx: f64, dy: f64) -> Res
     const MIN_W: f64 = 420.0;
     const MIN_H: f64 = 320.0;
 
+    // An upper bound as well as a lower one. Dragging the grip used to grow the
+    // window without limit, and a window taller than the display puts its own
+    // header off the top of the screen -- there is then no way to grab it, and
+    // the size is persisted, so a restart restores the same unreachable frame.
+    //
+    // The limit is the largest display's usable area rather than a constant:
+    // the window must fit on *some* screen, not on an imagined one.
+    let (max_w, max_h) = window
+        .available_monitors()
+        .ok()
+        .filter(|m| !m.is_empty())
+        .map(|monitors| {
+            monitors.iter().fold((0.0_f64, 0.0_f64), |(mw, mh), m| {
+                let s = m.size();
+                let sc = m.scale_factor() as f64;
+                (
+                    mw.max(s.width as f64 / sc),
+                    mh.max(s.height as f64 / sc),
+                )
+            })
+        })
+        .unzip();
+    let max_w = max_w.filter(|v| *v > MIN_W).unwrap_or(f64::INFINITY);
+    let max_h = max_h.filter(|v| *v > MIN_H).unwrap_or(f64::INFINITY);
+
+
     if corner.contains('w') {
-        let nw = (w - dx).max(MIN_W);
+        let nw = (w - dx).clamp(MIN_W, max_w);
         x += w - nw;
         w = nw;
     } else if corner.contains('e') {
-        w = (w + dx).max(MIN_W);
+        w = (w + dx).clamp(MIN_W, max_w);
     }
     if corner.contains('n') {
-        let nh = (h - dy).max(MIN_H);
+        let nh = (h - dy).clamp(MIN_H, max_h);
         y += h - nh;
         h = nh;
     } else if corner.contains('s') {
-        h = (h + dy).max(MIN_H);
+        h = (h + dy).clamp(MIN_H, max_h);
     }
 
     window
@@ -1940,6 +2208,19 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+/// Called after a drag finishes.
+///
+/// The OS drag is fire-and-forget: it ends wherever the pointer was released,
+/// including past the edge of every display. Checking here means the window
+/// cannot be parked somewhere unreachable in the first place, rather than
+/// relying on the next summon to notice.
+#[tauri::command]
+fn clamp_window(app: tauri::AppHandle) {
+    if let Some(window) = app.get_window("main") {
+        clamp_to_screens(&window);
+    }
+}
+
 #[tauri::command]
 fn set_external_links(app: tauri::AppHandle, mode: String) -> Result<String, String> {
     let mode = match mode.as_str() {
@@ -2213,6 +2494,12 @@ fn start_probe(app: tauri::AppHandle) {
                     cmd if cmd.starts_with("rail.width") => {
                         let w: f64 = cmd[10..].parse().unwrap_or(208.0);
                         let _ = set_rail_width(h.clone(), w);
+                    }
+                    "title" => {
+                        let active = h.state::<App>().active.lock().unwrap().clone();
+                        if let Some(w) = h.get_webview(&format!("tool_{active}")) {
+                            println!("PROBE title {:?}", w.url().map(|u| u.to_string()));
+                        }
                     }
                     "show" => { show_window(&h); }
                     "hide" => { if let Some(w) = h.get_window("main") { let _ = w.hide(); } }
@@ -2793,6 +3080,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
+    // Anchor the startup clock before anything else: see BOOT.
+    BOOT.get_or_init(std::time::Instant::now);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
@@ -2809,6 +3098,7 @@ fn main() {
             settings_dom: std::sync::Mutex::new(None),
             settings_open: std::sync::atomic::AtomicBool::new(false),
             content_hidden: std::sync::atomic::AtomicBool::new(false),
+            paint: std::sync::Mutex::new(std::collections::HashMap::new()),
             popups_seen: std::sync::atomic::AtomicUsize::new(0),
             popups_opened: std::sync::atomic::AtomicUsize::new(0),
             booted: std::sync::atomic::AtomicBool::new(false),
@@ -2816,11 +3106,13 @@ fn main() {
             menu_open: std::sync::atomic::AtomicBool::new(false),
             wants_visible: std::sync::atomic::AtomicBool::new(false),
             update_ready: std::sync::Mutex::new(None),
+            ready: std::sync::atomic::AtomicBool::new(false),
             pending_bytes: std::sync::Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             list_tools,
             rail_ready,
+            tool_paint,
             splash_stats,
             splash_done,
             set_pin,
@@ -2844,6 +3136,7 @@ fn main() {
             set_autostart,
             set_auto_check_update,
             set_external_links,
+            clamp_window,
             set_theme,
             set_shortcut,
             check_update,
@@ -2976,17 +3269,6 @@ fn main() {
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                     if std::env::var("ANYCHAT_DEMO_SHOW").is_ok() {
                         show_window(&handle);
-                    }
-                } else if handle
-                    .state::<App>()
-                    .booted
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    // The rail beat the splash into existence. Closing it now
-                    // is the only way to avoid a window that nothing will ever
-                    // dismiss, since the handover already happened.
-                    if let Some(splash) = handle.get_window(SPLASH_LABEL) {
-                        let _ = splash.close();
                     }
                 }
             } else {

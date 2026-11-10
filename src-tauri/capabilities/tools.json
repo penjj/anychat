@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tool-paint-report",
+  "description": "Lets a tool page report whether it painted. Deliberately separate from `default`: this is the only capability granted to remote origins, and it exposes exactly one command with no arguments that can affect the app. Everything privileged stays on the local capabilities, reachable only from the rail and the splash.",
+  "windows": [],
+  "webviews": [
+    "tool_*"
+  ],
+  "remote": {
+    "urls": [
+      "https://*",
+      "http://*"
+    ]
+  },
+  "permissions": [
+    "tool-paint"
+  ]
+}

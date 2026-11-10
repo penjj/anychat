@@ -152,3 +152,8 @@ commands.allow = ["resident_tools"]
 identifier = "updater-check"
 description = "Allows the settings panel to look for a newer release."
 commands.allow = ["check_update", "install_update"]
+
+[[permission]]
+identifier = "tool-paint"
+description = "Allows a tool page to report whether it actually painted, which is the only witness to a white screen."
+commands.allow = ["tool_paint"]

@@ -27,12 +27,22 @@ for _ in $(seq 1 10); do kill -0 "$BOOT_PID" 2>/dev/null || break; sleep 0.2; do
 kill -9 "$BOOT_PID" 2>/dev/null || true
 wait "$BOOT_PID" 2>/dev/null || true
 rm -f "$BOOT_LOG"
-# 3000ms is a ceiling with room for a cold cache on a slow machine, and far
-# below the 5400ms the fixed animation enforced.
-if [ -n "$HANDOVER" ] && [ "$HANDOVER" -lt 3000 ]; then
-  echo "PASS startup-handover-early  ${HANDOVER}ms"
+# Two failure modes, opposite directions.
+#
+# Too early means the splash was cut off before its film played, which was the
+# bug that made the launch look like nothing happened: the window is hidden
+# until handover, so closing the splash early shows a blank screen, not a faster
+# one. Too late means a start slow enough to be worth fixing.
+#
+# The film is 3s; the window plus page load adds a few hundred ms.
+if [ -z "$HANDOVER" ]; then
+  echo "FAIL startup-handover  no handover line"
+elif [ "$HANDOVER" -lt 2600 ]; then
+  echo "FAIL startup-handover  ${HANDOVER}ms, splash cut before the film finished"
+elif [ "$HANDOVER" -gt 6000 ]; then
+  echo "FAIL startup-handover  ${HANDOVER}ms, slower than the old fixed animation"
 else
-  echo "FAIL startup-handover-early  ${HANDOVER:-no handover line}ms"
+  echo "PASS startup-handover  ${HANDOVER}ms"
 fi
 
 echo "== self-check =="

@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "anychat"
-version = "0.2.7"
+version = "0.2.10"
 dependencies = [
  "objc2",
  "objc2-app-kit",
@@ -59,6 +59,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-updater",
  "ureq",
+ "webview2-com",
 ]
 
 [[package]]

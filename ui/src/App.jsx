@@ -515,6 +515,36 @@ export default function App () {
         app: { w: Math.round(window.innerWidth), h: Math.round(window.innerHeight) },
         win: { w: window.innerWidth, h: window.innerHeight },
         settingsPanel: Boolean(document.querySelector('#settings-view .settings-card')),
+        // Whether a pointer aimed at the panel would actually land on it.
+        //
+        // Presence is not reachability: a native child view composited above the
+        // rail paints over the panel while leaving every element in the DOM
+        // exactly where it was, so `querySelector` finds the card and a click
+        // goes somewhere else. `elementFromPoint` is the only check that sees
+        // the difference, and it is the difference the user reported as "nothing
+        // in settings can be clicked, not even close".
+        settingsHit: (() => {
+          const card = document.querySelector('#settings-view .settings-card')
+          if (!card) return null
+          const r = card.getBoundingClientRect()
+          if (r.width === 0 || r.height === 0) return { ok: false, why: 'zero-rect' }
+          // Probe the middle of the card and of its close button.
+          const at = (x, y) => {
+            const n = document.elementFromPoint(x, y)
+            return n ? (card === n || card.contains(n)) : false
+          }
+          const mid = at(r.left + r.width / 2, r.top + r.height / 2)
+          const closeBtn = document.querySelector('#settings-view .card-head .icon-btn')
+          const closeHit = closeBtn
+            ? (() => {
+                const b = closeBtn.getBoundingClientRect()
+                if (b.width === 0) return false
+                const n = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)
+                return Boolean(n && (closeBtn === n || closeBtn.contains(n)))
+              })()
+            : true
+          return { ok: mid && closeHit, why: `mid=${mid} close=${closeHit}` }
+        })(),
         settingsHidden: document.getElementById('settings-view')?.hidden ?? true,
         chrome: head && pin && hide
           ? {
@@ -567,7 +597,10 @@ export default function App () {
       cancelAnimationFrame(a)
       clearTimeout(b)
     }
-  }, [railWidth, state.tools.length, state.active, broken, reportReady])
+    // `settingsOpen` belongs here: opening the panel changes what a pointer can
+    // reach, and the reachability report is part of this payload. Without it the
+    // host keeps reading the pre-open snapshot, which has no panel to hit.
+  }, [railWidth, state.tools.length, state.active, broken, settingsOpen, reportReady])
 
   /* ---------- backend state ---------- */
 
@@ -902,7 +935,14 @@ export default function App () {
   const startDrag = (e) => {
     if (e.button !== 0) return
     if (e.target.closest('button, input, a, .tool')) return
-    window.__TAURI__.window.getCurrentWindow().startDragging().catch(() => {})
+    // startDragging resolves when the drag ends, which is exactly when the
+    // window can be sitting past the edge of every display. Ask the host to
+    // pull it back then, instead of discovering it on the next summon.
+    window.__TAURI__.window
+      .getCurrentWindow()
+      .startDragging()
+      .then(() => invoke('clamp_window'))
+      .catch(() => {})
   }
 
   /* ---------- render ---------- */

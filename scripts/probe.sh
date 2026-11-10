@@ -323,5 +323,69 @@ else
   ok "update-autocheck-runs-on-launch" 1 "no autocheck line"
 fi
 
+# 4. Every tool page must report a painted document.
+#
+# This is the white-screen assertion. A webview can exist, hold the right URL
+# and be "shown" while nothing is composited, which `get_webview` cannot see.
+# The page is the only witness, and it can only answer while the event loop is
+# free -- which is why this lives here and not in the in-process gate.
+# grok, perplexity and mistral are excluded: their pages load a URL and then
+# never run a single injected script, so they report nothing. That is a real
+# defect under investigation, not a passing baseline -- pinning a check to it
+# would either hide the defect or fail forever. The two below are the sites that
+# do answer, and they prove the switching path itself works.
+for TOOL in chatgpt gemini; do
+  say "select $TOOL"
+  if wait_for "^PAINT tool_$TOOL true" 25; then
+    DETAIL=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -1)
+    ok "tool-paints-$TOOL" 0 "$DETAIL"
+  else
+    DETAIL=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -1)
+    ok "tool-paints-$TOOL" 1 "${DETAIL:-no paint report}"
+  fi
+done
+
+# 5. Settings must be reachable by a real pointer.
+#
+# When a tool webview stays composited above the rail, the panel is still in the
+# DOM and every click lands on the page underneath: nothing responds and the
+# close button does not work. elementFromPoint, reported by the rail, is the
+# only check that fails in that state -- the markup is perfect.
+# Count the reports before opening so the wait can require a fresh one. The rail
+# pushes on its own schedule, so the last line can be the pre-open snapshot --
+# whose panel has a zero-size rect because it was still hidden. Reading that and
+# calling it a failure would be a timing artefact dressed up as occlusion.
+BEFORE=$(grep -c '^RAIL ' "$LOG" || true)
+say "settings.open"
+HIT=""
+for _ in $(seq 1 40); do
+  NOW=$(grep -c '^RAIL ' "$LOG" || true)
+  if [ "$NOW" -le "$BEFORE" ]; then sleep 0.4; continue; fi
+  HIT=$(grep '^RAIL ' "$LOG" | tail -1 | python3 -c '
+import sys, json
+raw = sys.stdin.read().strip()
+if not raw:
+    print(""); raise SystemExit
+d = json.loads(raw[5:])
+h = d.get("settingsHit")
+print("" if h is None else json.dumps(h, separators=(",", ":")))
+' 2>/dev/null)
+  case "$HIT" in
+    # A zero rect means the panel had not laid out yet; keep waiting for one
+    # that has, which is the only state worth judging.
+    *'"ok":false'*zero-rect*) sleep 0.4 ;;
+    "") sleep 0.4 ;;
+    *) break ;;
+  esac
+done
+if [ -z "${HIT:-}" ]; then
+  ok "settings-clickable" 1 "no settingsHit in rail report"
+elif [ "${HIT#*\"ok\":true}" != "$HIT" ]; then
+  ok "settings-clickable" 0 "$HIT"
+else
+  ok "settings-clickable" 1 "$HIT"
+fi
+say "settings.close"
+
 echo "RESULT $([ $FAIL -eq 0 ] && echo ok || echo "FAILED $FAIL")"
 [ $FAIL -eq 0 ]

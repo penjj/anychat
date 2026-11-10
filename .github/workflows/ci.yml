@@ -1,0 +1,172 @@
+name: ci
+
+# Runs on every push and pull request, before any release exists.
+#
+# The reason this file exists: three Windows-only defects shipped — a console
+# window on launch, only the first chat usable with the rest white, and a
+# settings panel that drew but could not be clicked. None of them could be
+# reproduced on the machine the work happened on, and nothing in the repository
+# ever built for Windows outside a tagged release. A release build that nobody
+# ran is not a check.
+#
+# Two layers, because they catch different things:
+#   * compile — every target, debug and release, so a platform-only code path
+#     cannot rot unnoticed. Release matters on its own: the console-window flag
+#     is debug/release conditional, so only a release build proves it.
+#   * gate — the app's own acceptance run, which drives real webviews.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A newer push supersedes an in-flight run for the same ref. The gates take
+# minutes; leaving stale ones queued wastes the concurrency budget and makes the
+# status list unreadable.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The updater is not exercised here; a placeholder keeps the build from
+  # asking for a signing key it will not use for a check.
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Cheap and exhaustive first: if it does not compile for a target, the gate on
+  # that target is meaningless. LTO is off in this profile to keep it quick —
+  # this job is about code paths, not the optimiser.
+  compile:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            name: mac-arm64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: win-x64
+          # Windows arm64 has no hosted runner, so it cross-compiles from x64.
+          - platform: windows-latest
+            target: aarch64-pc-windows-msvc
+            name: win-arm64
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      # The UI is a build input, not a committed artefact.
+      - name: Build UI
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.name }}
+
+      # The arm64 MSVC linker is not on the hosted image. Same setup as the
+      # release workflow; without it this leg fails in the linker, not the code.
+      - name: Add arm64 MSVC toolchain
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $vs = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $path = & $vs -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $devcmd = "`"$path\Common7\Tools\VsDevCmd.bat`""
+          & cmd /c "$devcmd -arch=arm64 -host_arch=x64 && set" |
+            ForEach-Object {
+              if ($_ -match '^([^=]+)=(.*)$') { "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+            }
+
+      # Debug first: fastest signal, and it is the profile the gate runs.
+      - name: Check debug
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --locked
+        shell: pwsh
+
+      # Release is not redundant. `windows_subsystem` is `not(debug_assertions)`,
+      # so a release-only compile error — or a silently console-linked binary —
+      # is invisible to the debug build above.
+      - name: Check release
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --release --locked
+        shell: pwsh
+
+  # The app's own acceptance gate, on the platform that can open a window.
+  #
+  # macOS runners have a window server; the gates below create real windows and
+  # real webviews, which is what makes them meaningful. Windows runners have a
+  # session too, and the same gate runs there — that is the leg that would have
+  # caught all three reported defects.
+  gate:
+    needs: compile
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            name: mac-arm64
+          - platform: windows-latest
+            name: win-x64
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Build UI
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'win-x64' && 'x86_64-pc-windows-msvc' || 'aarch64-apple-darwin' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: gate-${{ matrix.name }}
+
+      - name: Build app
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked
+        shell: bash
+
+      # The in-process gate. It drives window APIs and asserts the invariants
+      # that do not need the page to answer.
+      - name: Gate — self-check
+        run: bash scripts/smoke.sh
+        shell: bash
+        timeout-minutes: 12
+
+      # The live gate. It talks to the running app over stdin so the event loop
+      # stays free, which is the only way the rail and the tool pages can
+      # answer. This is where a white page and an unclickable panel show up.
+      - name: Gate — live probe
+        run: bash scripts/probe.sh
+        shell: bash
+        timeout-minutes: 15
+
+      - name: Upload gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs-${{ matrix.name }}
+          path: |
+            /tmp/anychat-smoke.txt
+          if-no-files-found: ignore
