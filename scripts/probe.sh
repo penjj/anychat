@@ -70,7 +70,7 @@ cleanup () {
 }
   kill "$WATCHDOG" 2>/dev/null || true
 
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIPPED=0
 ok () { if [ "$2" -eq 0 ]; then echo "PASS $1"; PASS=$((PASS + 1)); else echo "FAIL $1${3:+  $3}"; FAIL=$((FAIL + 1)); fi; }
 # Parsed, not pattern-matched. A hand-rolled sed expression over the report
 # silently yields a stale or wrong number when the shape of one field changes,
@@ -271,12 +271,20 @@ AFTER_SLOT=$(rail_field "$AFTER" slot.w)
 # window refused it or the report is simply not the one this step caused.
 RESIZE_APPLIED=$(grep 'PROBE resized=' "$LOG" | tail -1)
 AFTER_RAIL_W=$(rail_field "$AFTER" railWidth)
+AFTER_WIN=$(rail_field "$AFTER" win.w)
 if [ "$CUR_W_MISSING" -eq 1 ]; then
   ok "window-resize-moves-content" 1 "no window size in the rail report"
+elif [ -n "$AFTER_WIN" ] && [ "$AFTER_WIN" = "$CUR_W" ]; then
+  # The window never changed size, so there is nothing to conclude about the
+  # content following it. A hosted macOS runner's display refuses resizes, and
+  # a check that reports the product broken because the display said no is
+  # worse than one that says it could not look.
+  SKIPPED=$((SKIPPED + 1))
+  echo "SKIP window-resize-moves-content  the window stayed ${CUR_W} wide when asked for ${SMALL_W}"
 elif [ -n "$BEFORE_SLOT" ] && [ -n "$AFTER_SLOT" ] && [ "$AFTER_SLOT" -ne "$BEFORE_SLOT" ]; then
   ok "window-resize-moves-content" 0 "slot ${BEFORE_SLOT} -> ${AFTER_SLOT}"
 else
-  ok "window-resize-moves-content" 1 "before=${BEFORE_SLOT:-none} after=${AFTER_SLOT:-none} window=${CUR_W} asked=${SMALL_W} app=[${RESIZE_APPLIED:-no resize line}]"
+  ok "window-resize-moves-content" 1 "before=${BEFORE_SLOT:-none} after=${AFTER_SLOT:-none} window=${CUR_W} after_window=${AFTER_WIN:-none} asked=${SMALL_W} app=[${RESIZE_APPLIED:-no resize line}]"
 fi
 # The rail keeps whatever width the user chose; the window does not stretch it.
 if [ -n "$AFTER_RAIL_W" ] && [ "$AFTER_RAIL_W" = "$BEFORE_RAIL_W" ]; then
@@ -506,5 +514,5 @@ if [ "$FAIL" -ne 0 ]; then
   echo "== app log (tail) =="
   grep -E '^(RAIL|PROBE|PAINT|anychat)' "$LOG" 2>/dev/null | tail -40 || echo "(no app log)"
 fi
-echo "RESULT $([ $FAIL -eq 0 ] && echo ok || echo "FAILED $FAIL")"
+echo "RESULT $([ $FAIL -eq 0 ] && echo ok || echo "FAILED $FAIL")$([ $SKIPPED -gt 0 ] && echo " (skipped $SKIPPED)")"
 [ $FAIL -eq 0 ]
