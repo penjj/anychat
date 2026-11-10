@@ -3190,13 +3190,27 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
         app.state::<App>().content_hidden.load(std::sync::atomic::Ordering::SeqCst),
         format!("content_hidden={}", app.state::<App>().content_hidden.load(std::sync::atomic::Ordering::SeqCst)));
 
+    // Fifteen seconds. The page has to load, receive state and report, and on a
+    // shared runner none of that is quick. Four seconds failed as "no rail
+    // report", which says nothing about whether the rail works.
     let mut rail_dom = String::new();
-    for _ in 0..40 {
+    for _ in 0..150 {
         if let Some(v) = app.state::<App>().rail.lock().unwrap().clone() {
             rail_dom = v;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if rail_dom.is_empty() {
+        // Say why there is no report: a rail page that never loaded and a rail
+        // page that loaded but never spoke are different problems, and the empty
+        // string covers both.
+        let rail_url = app
+            .get_webview(RAIL_LABEL)
+            .and_then(|w| w.url().ok())
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "no-webview".into());
+        rail_dom = format!("no rail report (url={rail_url})");
     }
     check("settings-panel-markup-present",
         rail_dom.contains("\"settingsPanel\":true"),
@@ -3231,6 +3245,10 @@ fn run_smoke(app: &tauri::AppHandle, done: &std::sync::atomic::AtomicBool) {
     // before the tool list has arrived from the host: that snapshot says
     // `tools:0`, and taking it would report a correct UI as a broken one. Every
     // later state change provokes another report, so this converges.
+    // Fifteen seconds, not five. The rail reports after the host has pushed
+    // state to it, and on a shared runner that can take several seconds past
+    // the point where the window exists. A short wait here failed as "no rail
+    // report", which says nothing about whether the rail works.
     let mut dom = String::new();
     for _ in 0..60 {
         if let Some(v) = app.state::<App>().rail.lock().unwrap().clone() {
