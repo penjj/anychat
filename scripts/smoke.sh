@@ -38,12 +38,14 @@ rm -f "$BOOT_LOG"
 # A ceiling that survives a slow shared runner without accepting a regression.
 # The bug this guards is the splash film being cut short, which is under 2600;
 # the upper bound catches "the app now waits on something it did not before".
-# 20s: the animation is 3s, the rest is webview start plus page load, measured
-# at 8-12s on a cold hosted runner and under 5s locally. Two runs landed either
+# 30s: the animation is 3s, the rest is webview start plus page load, measured
+# at 8-21s on a cold hosted runner and under 5s locally. The bound catches a
+# splash cut short (under 2.6s) and a genuine regression in startup, not the
+# wide variance of a shared runner's scheduling. Two runs landed either
 # side of 12s, and a bound that close turns runner jitter into a failure. What
 # this must catch is the splash film being cut short (under 2600ms), and a start
 # slow enough to be a regression -- not a second of scheduling noise.
-HANDOVER_CEILING="${HANDOVER_CEILING:-20000}"
+HANDOVER_CEILING="${HANDOVER_CEILING:-30000}"
 HANDOVER_FAIL=0
 if [ -z "$HANDOVER" ]; then
   echo "FAIL startup-handover  no handover line"

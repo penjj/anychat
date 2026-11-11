@@ -501,16 +501,19 @@ done
 for TOOL in chatgpt gemini chatgpt gemini; do
   PAINT_BEFORE=$(grep -c "^PAINT tool_$TOOL " "$LOG" 2>/dev/null || echo 0)
   say "select $TOOL"
+  # Reload so every switch produces a fresh report. Switching back to a view
+  # that is already loaded would otherwise emit nothing, and a check that only
+  # looked for "some painted report" would pass on the report from the first
+  # visit -- hiding exactly the "later views are white" defect.
+  say "reload"
   PAINTED=1
   DETAIL=""
   for _ in $(seq 1 100); do
     NOW=$(grep -c "^PAINT tool_$TOOL " "$LOG" 2>/dev/null || echo 0)
     if [ "$NOW" -gt "$PAINT_BEFORE" ]; then
-      # Only the new reports, and only one that actually says painted. The
-      # injected script reports as soon as `readyState` is complete (which a
-      # fresh, empty document also is) and again 2.5s later, so the first line
-      # after a switch is often `false kids=0` from a page that has not loaded
-      # yet. Reading the last line made a correctly loading page look white.
+      # The injected script reports on `readyState` (a fresh, empty document is
+      # already complete) and again 2.5s later, so an early `false kids=0` is
+      # normal. Wait for a report from this switch that actually says painted.
       FRESH=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -n +$((PAINT_BEFORE + 1)))
       DETAIL=$(printf '%s\n' "$FRESH" | grep ' true ' | tail -1)
       if [ -n "$DETAIL" ]; then

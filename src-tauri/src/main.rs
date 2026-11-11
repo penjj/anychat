@@ -2683,6 +2683,17 @@ fn run_probe_command(h: tauri::AppHandle, cmd: String) {
                             println!("PROBE title {:?}", w.url().map(|u| u.to_string()));
                         }
                     }
+                    "reload" => {
+                        let active = h.state::<App>().active.lock().unwrap().clone();
+                        if let Some(w) = h.get_webview(&format!("tool_{active}")) {
+                            match w.reload() {
+                                Ok(()) => println!("PROBE reload ok"),
+                                Err(e) => println!("PROBE reload-err {e}"),
+                            }
+                        } else {
+                            println!("PROBE reload no-webview");
+                        }
+                    }
                     "show" => { show_window(&h); }
                     "hide" => { if let Some(w) = h.get_window("main") { let _ = w.hide(); } }
                     // Whether the injected policy is present in the live page.
