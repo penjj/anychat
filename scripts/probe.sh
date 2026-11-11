@@ -93,8 +93,19 @@ print(v if v != "" else "")
 # 1. rail reports its DOM at all
 wait_for '^RAIL ' 25; ok "rail-reports-dom" $?
 
-LAST_RAIL=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
 EXPECTED=$(grep -c '^    t("' ../src-tauri/src/tools.rs)
+# Wait for a report that has received the tool list. The first report is the
+# page's own layout, sent before the host's state event has landed, so it says
+# `tools:0`; matching "any RAIL line" took that one and called a working rail
+# empty. The state event provokes another report, so this converges.
+LAST_RAIL=""
+for _ in $(seq 1 100); do
+  LAST_RAIL=$(grep '^RAIL ' "$LOG" | tail -1 | sed 's/^RAIL //')
+  case "$LAST_RAIL" in
+    *"\"tools\":$EXPECTED"*) break ;;
+  esac
+  sleep 0.25
+done
 echo "$LAST_RAIL" | grep -q "\"tools\":$EXPECTED"; ok "rail-has-$EXPECTED-tools" $? "$LAST_RAIL"
 echo "$LAST_RAIL" | grep -q '"mainWidth":[1-9]'; ok "content-area-has-width" $? "$LAST_RAIL"
 
