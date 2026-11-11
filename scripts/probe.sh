@@ -489,6 +489,36 @@ for TOOL in chatgpt gemini; do
   fi
 done
 
+# Switching must keep working past the second view. The reported defect was
+# "the first page is fine and everything after it is white", and a check that
+# only ever visits two tools cannot see it: the failure shows up on the third
+# child and every one after. Each switch is judged on that view's own paint
+# report, which the page sends only if it actually rendered.
+#
+# Only tools the machine can reach are listed: an unreachable host never runs a
+# script, so including one would fail for a reason unrelated to the app. What is
+# being proven is the switching path, not the reachability of every site.
+for TOOL in chatgpt gemini chatgpt gemini; do
+  say "select $TOOL"
+  # A report from before this switch must not satisfy it, hence the count.
+  PAINT_BEFORE=$(grep -c "^PAINT tool_$TOOL " "$LOG" 2>/dev/null || echo 0)
+  PAINTED=1
+  for _ in $(seq 1 100); do
+    NOW=$(grep -c "^PAINT tool_$TOOL " "$LOG" 2>/dev/null || echo 0)
+    LATEST=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -1)
+    # A fresh report *and* a painted one. The report says "true" only when the
+    # document has children and a non-zero box, which is exactly what a white
+    # window does not have.
+    if [ "$NOW" -gt "$PAINT_BEFORE" ] && [ "${LATEST#* true }" != "$LATEST" ]; then
+      PAINTED=0
+      break
+    fi
+    sleep 0.25
+  done
+  DETAIL=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -1)
+  ok "tool-repaints-after-switch-$TOOL" $PAINTED "${DETAIL:-no paint report}"
+done
+
 # 5. Settings must be reachable by a real pointer.
 #
 # When a tool webview stays composited above the rail, the panel is still in the
