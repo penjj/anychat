@@ -1934,6 +1934,51 @@ fn on_window_hidden(app: &tauri::AppHandle) {
     emit_state(app);
 }
 
+/// Hide the window after it lost focus, unless something is holding it open.
+///
+/// Called from the `Focused(false)` event after a short delay, and from the
+/// live gate's `simulate_blur` command so the check exercises this exact code
+/// path. Reading the window's live `is_always_on_top` rather than the saved
+/// layout keeps the decision in sync with a pin the user just toggled.
+fn blur_auto_hide(app: &tauri::AppHandle, assume_blurred: bool) {
+    let Some(w) = app.get_window("main") else { return };
+    // The window may have regained focus in the meantime. `assume_blurred` is
+    // the live gate asking to exercise the suppression rules directly: a
+    // headless runner has no second window to click into, so it cannot produce
+    // a real Focused(false), but everything below this check is the same code.
+    if !assume_blurred
+        && (w.is_focused().unwrap_or(false) || !w.is_visible().unwrap_or(false))
+    {
+        return;
+    }
+    if !w.is_visible().unwrap_or(false) {
+        return;
+    }
+    // A pinned window deliberately stays where the user put it. `set_always_on_top`
+    // alone only changes stacking; without this, clicking into a chat page and
+    // then out still hid the window despite the pin being on.
+    if w.is_always_on_top().unwrap_or(false) {
+        return;
+    }
+    let st = app.state::<App>();
+    if st.settings_open.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if st.menu_open.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    // A popup counts while it is on screen: the login window is the focused
+    // window then, and hiding the opener would strand the flow.
+    #[cfg(target_os = "macos")]
+    {
+        if any_other_window_open(app) {
+            return;
+        }
+    }
+    let _ = w.hide();
+    on_window_hidden(app);
+}
+
 /// Reclaim one tool's webview, refusing the active one: destroying what the
 /// user is looking at would blank the window with no way back but a reload.
 #[tauri::command]
@@ -2696,6 +2741,34 @@ fn run_probe_command(h: tauri::AppHandle, cmd: String) {
                     }
                     "show" => { show_window(&h); }
                     "hide" => { if let Some(w) = h.get_window("main") { let _ = w.hide(); } }
+                    cmd if cmd.starts_with("pin ") => {
+                        let on = cmd[4..].trim() == "1";
+                        // Mirror `set_pin`: a summon restores the saved value,
+                        // so changing only the window flag would be undone by
+                        // the next `show` and the check would test nothing.
+                        match set_pin(h.clone(), on) {
+                            Ok(state) => println!("PROBE pin set={state}"),
+                            Err(e) => println!("PROBE pin-err {e}"),
+                        }
+                    }
+                    // Runs the same auto-hide path the Focused(false) event uses,
+                    // without needing a real focus change -- a headless runner has
+                    // no other window to click into.
+                    "simulate_blur" => {
+                        blur_auto_hide(&h, true);
+                        let visible = h
+                            .get_window("main")
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
+                        println!("PROBE blur-visible={visible}");
+                    }
+                    "pin_state" => {
+                        let pinned = h
+                            .get_window("main")
+                            .and_then(|w| w.is_always_on_top().ok())
+                            .unwrap_or(false);
+                        println!("PROBE pin-state={pinned}");
+                    }
                     // Whether the injected policy is present in the live page.
                     // eval() cannot return a value to the host, so the report
                     // comes back through the page title on the next read.
@@ -3610,10 +3683,11 @@ fn main() {
                 //
                 // For a summonable utility this is the expected behaviour: click
                 // away and it gets out of the way, no ⌘W needed. It is also the
-                // riskiest event to act on, so three things suppress it -- an
-                // open context menu, an open settings panel, and any window the
-                // app just opened on the user's behalf (a login popup). Hiding
-                // in those cases would make the app appear to have crashed.
+                // riskiest event to act on, so four things suppress it -- a
+                // pinned window, an open context menu, an open settings panel,
+                // and any window the app just opened on the user's behalf (a
+                // login popup). Hiding in those cases would make the app appear
+                // to have crashed.
                 tauri::WindowEvent::Focused(false) => {
                     // Headless gate runs resize and focus the window on purpose;
                     // auto-hiding under them invalidates every geometry check.
@@ -3628,29 +3702,7 @@ fn main() {
                     // the window the user is still working in.
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(400));
-                        // The window may have regained focus in the meantime.
-                        let Some(w) = app.get_window("main") else { return };
-                        if w.is_focused().unwrap_or(false) || !w.is_visible().unwrap_or(false) {
-                            return;
-                        }
-                        let st = app.state::<App>();
-                        if st.settings_open.load(std::sync::atomic::Ordering::SeqCst) {
-                            return;
-                        }
-                        if st.menu_open.load(std::sync::atomic::Ordering::SeqCst) {
-                            return;
-                        }
-                        // A popup counts while it is on screen: the login window
-                        // is the focused window then, and hiding the opener
-                        // would strand the flow.
-                        #[cfg(target_os = "macos")]
-                        {
-                            if any_other_window_open(&app) {
-                                return;
-                            }
-                        }
-                        let _ = w.hide();
-                        on_window_hidden(&app);
+                        blur_auto_hide(&app, false);
                     });
                 }
                 tauri::WindowEvent::Resized(_) => {

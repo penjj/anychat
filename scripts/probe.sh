@@ -580,6 +580,42 @@ else
 fi
 say "settings.close"
 
+# A pinned window must stay put when the user clicks away. The reported bug:
+# turn the pin on, click into a chat page, click outside, and the window hides
+# anyway -- `set_always_on_top` changed stacking but the blur auto-hide was
+# never told about the pin. These run last because one of them hides the window.
+BLUR_LINES=$(grep -c 'PROBE blur-visible=' "$LOG" 2>/dev/null || echo 0)
+say "show"
+say "pin 1"
+say "simulate_blur"
+for _ in $(seq 1 40); do
+  [ "$(grep -c 'PROBE blur-visible=' "$LOG" 2>/dev/null || echo 0)" -gt "$BLUR_LINES" ] && break
+  sleep 0.25
+done
+BLUR_PINNED=$(grep 'PROBE blur-visible=' "$LOG" | tail -1)
+if [ "$BLUR_PINNED" = "PROBE blur-visible=true" ]; then
+  ok "pinned-window-stays-visible-on-blur" 0 "$BLUR_PINNED"
+else
+  ok "pinned-window-stays-visible-on-blur" 1 "${BLUR_PINNED:-no report}"
+fi
+
+# And the pin must not disable auto-hide altogether: unpinned, clicking away
+# should still get the window out of the way.
+BLUR_LINES=$(grep -c 'PROBE blur-visible=' "$LOG" 2>/dev/null || echo 0)
+say "show"
+say "pin 0"
+say "simulate_blur"
+for _ in $(seq 1 40); do
+  [ "$(grep -c 'PROBE blur-visible=' "$LOG" 2>/dev/null || echo 0)" -gt "$BLUR_LINES" ] && break
+  sleep 0.25
+done
+BLUR_UNPINNED=$(grep 'PROBE blur-visible=' "$LOG" | tail -1)
+if [ "$BLUR_UNPINNED" = "PROBE blur-visible=false" ]; then
+  ok "unpinned-window-hides-on-blur" 0 "$BLUR_UNPINNED"
+else
+  ok "unpinned-window-hides-on-blur" 1 "${BLUR_UNPINNED:-no report}"
+fi
+
 # The app's own log never reaches the CI console -- it lives in a temp file --
 # so a failing assertion had no evidence beside it and the numbers in the report
 # could not be checked against what the app actually said. Printed on failure
