@@ -499,23 +499,28 @@ done
 # script, so including one would fail for a reason unrelated to the app. What is
 # being proven is the switching path, not the reachability of every site.
 for TOOL in chatgpt gemini chatgpt gemini; do
-  say "select $TOOL"
-  # A report from before this switch must not satisfy it, hence the count.
   PAINT_BEFORE=$(grep -c "^PAINT tool_$TOOL " "$LOG" 2>/dev/null || echo 0)
+  say "select $TOOL"
   PAINTED=1
+  DETAIL=""
   for _ in $(seq 1 100); do
     NOW=$(grep -c "^PAINT tool_$TOOL " "$LOG" 2>/dev/null || echo 0)
-    LATEST=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -1)
-    # A fresh report *and* a painted one. The report says "true" only when the
-    # document has children and a non-zero box, which is exactly what a white
-    # window does not have.
-    if [ "$NOW" -gt "$PAINT_BEFORE" ] && [ "${LATEST#* true }" != "$LATEST" ]; then
-      PAINTED=0
-      break
+    if [ "$NOW" -gt "$PAINT_BEFORE" ]; then
+      # Only the new reports, and only one that actually says painted. The
+      # injected script reports as soon as `readyState` is complete (which a
+      # fresh, empty document also is) and again 2.5s later, so the first line
+      # after a switch is often `false kids=0` from a page that has not loaded
+      # yet. Reading the last line made a correctly loading page look white.
+      FRESH=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -n +$((PAINT_BEFORE + 1)))
+      DETAIL=$(printf '%s\n' "$FRESH" | grep ' true ' | tail -1)
+      if [ -n "$DETAIL" ]; then
+        PAINTED=0
+        break
+      fi
     fi
     sleep 0.25
   done
-  DETAIL=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -1)
+  [ -z "$DETAIL" ] && DETAIL=$(grep "^PAINT tool_$TOOL " "$LOG" | tail -1)
   ok "tool-repaints-after-switch-$TOOL" $PAINTED "${DETAIL:-no paint report}"
 done
 
