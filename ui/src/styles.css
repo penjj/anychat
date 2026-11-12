@@ -140,6 +140,15 @@ html, body {
   cursor: default;
 }
 
+/* On Windows the host window is opaque (a transparent layered window there
+   swallows WebView2 clicks), so the page must paint its own backdrop instead of
+   letting the desktop show through. Use the themed base colour so the rounded
+   silhouette blends with the content rather than a stray window colour. */
+html[data-platform="win"],
+html[data-platform="win"] body {
+  background: var(--bg);
+}
+
 /* React mounts here, so it must carry the full-height chain that used to run
    straight from body to #app. Without this, #app's height:100% resolves against
    an auto-height parent and the content area silently overflows the window. */

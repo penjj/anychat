@@ -1,8 +1,94 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { invoke as tauriInvoke } from '@tauri-apps/api/core'
+import { listen as tauriListen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
-const invoke = window.__TAURI__.core.invoke
-const events = window.__TAURI__.event
+/* ---- TEMP DIAGNOSTICS -------------------------------------------------- */
+/* Wrapping invoke/listen here covers every call site in this file without   */
+/* touching each one. Remove together with the block in main.jsx.           */
+const DIAG_LOG = (window.__ANYCHAT_LOG__ = window.__ANYCHAT_LOG__ || [])
+const dlog = (...parts) => {
+  DIAG_LOG.push({ at: new Date().toISOString().slice(11, 23), parts })
+  console.info('[anychat]', ...parts)
+}
 
+function brief (v) {
+  if (v === undefined || v === null) return String(v)
+  if (Array.isArray(v)) return `Array(${v.length})`
+  if (typeof v === 'object') {
+    const keys = Object.keys(v)
+    const head = keys.slice(0, 10).join(',')
+    return `{${head}${keys.length > 10 ? `,+${keys.length - 10}` : ''}}`
+  }
+  const s = String(v)
+  return s.length > 100 ? s.slice(0, 100) + '…' : s
+}
+
+/* Commands fired on a timer or every pointer move. Print the first call and a
+   heartbeat instead of flooding the console; failures are still visible. */
+const QUIET = new Set(['state', 'layout', 'current_url', 'rail_ready', 'settings_ready'])
+const callCount = new Map()
+let lastStateSig = ''
+let stateRepeat = 0
+
+function logStateChange (payload) {
+  const snap = {
+    tools: Array.isArray(payload.tools) ? payload.tools.length : 'n/a',
+    active: payload.active,
+    settings_open: payload.settings_open,
+    rail_width: payload.rail_width,
+    theme: payload.theme,
+  }
+  const sig = JSON.stringify(snap)
+  if (sig === lastStateSig) {
+    stateRepeat += 1
+    if (stateRepeat % 20 === 0) dlog('adoptState (unchanged x' + stateRepeat + ')', snap)
+    return
+  }
+  if (stateRepeat > 0) dlog('adoptState (previous repeated x' + stateRepeat + ')')
+  lastStateSig = sig
+  stateRepeat = 0
+  dlog('adoptState CHANGED', snap)
+}
+
+async function invoke (cmd, args) {
+  const t0 = performance.now()
+  const n = (callCount.get(cmd) || 0) + 1
+  callCount.set(cmd, n)
+  const quiet = QUIET.has(cmd)
+  const show = !quiet || n === 1 || n % 20 === 0
+  if (show) dlog('invoke >', cmd, brief(args), quiet ? `(call #${n}, quiet)` : '')
+  try {
+    const out = await tauriInvoke(cmd, args)
+    if (show) dlog('invoke <', cmd, `${Math.round(performance.now() - t0)}ms`, brief(out))
+    return out
+  } catch (err) {
+    if (show) dlog('invoke !!', cmd, `${Math.round(performance.now() - t0)}ms`, String(err))
+    throw err
+  }
+}
+
+async function listen (event, handler) {
+  dlog('listen >', event)
+  try {
+    const unlisten = await tauriListen(event, (e) => {
+      dlog('event <', event, brief(e && e.payload))
+      return handler(e)
+    })
+    dlog('listen ok', event)
+    return unlisten
+  } catch (err) {
+    dlog('listen !!', event, String(err))
+    throw err
+  }
+}
+/* ---- END TEMP DIAGNOSTICS ---------------------------------------------- */
+
+// `withGlobalTauri` exposes `window.__TAURI__` through an injected init script.
+// On a runtime-created child webview that script is not guaranteed to have run
+// when this module evaluates (Windows/WebView2), so reading `.core` at import
+// time threw before React could mount. The package uses the IPC bootstrap that
+// is always injected, and never dereferences a global during module evaluation.
 const GROUP_NAMES = { global: '国际', cn: '国内', build: '构建' }
 const GROUP_ORDER = ['global', 'cn', 'build']
 const PINNED_COUNT = 10
@@ -346,7 +432,7 @@ export default function App () {
     let unlisten = null
     const bind = async () => {
       try {
-        unlisten = await window.__TAURI__.event.listen('update-progress', (e) => {
+        unlisten = await listen('update-progress', (e) => {
           const { downloaded, total } = e.payload || {}
           if (!total) return
           setUpdate((u) => ({ ...u, progress: Math.min(1, downloaded / total) }))
@@ -606,6 +692,7 @@ export default function App () {
 
   const adoptState = useCallback((payload) => {
     if (!payload) return
+    logStateChange(payload)
     setState((prev) => ({ ...prev, ...payload }))
     if (typeof payload.rail_width === 'number') {
       setRailWidth(payload.rail_width)
@@ -626,20 +713,20 @@ export default function App () {
 
     // Driven by the backend so the sweep runs whether ⌘N was pressed in the
     // rail or inside a tool page, which cannot see the rail's handlers.
-    events.listen('new-chat', () => { if (alive) sweepRef.current() })
+    listen('new-chat', () => { if (alive) sweepRef.current() })
       .then((f) => alive && unlisten.push(f))
       .catch(() => {})
 
-    events.listen('state', (e) => { if (alive) adoptState(e.payload) })
+    listen('state', (e) => { if (alive) adoptState(e.payload) })
       .then((f) => alive && unlisten.push(f))
       .catch(() => {})
 
-    events.listen('icons-ready', () => {
+    listen('icons-ready', () => {
       if (!alive) return
       invoke('state').then((payload) => { adoptState(payload); reportReady() }).catch(() => {})
     }).then((f) => alive && unlisten.push(f)).catch(() => {})
 
-    events.listen('rail-layout', (e) => {
+    listen('rail-layout', (e) => {
       if (!alive) return
       const w = e.payload?.rail_width
       if (typeof w === 'number') {
@@ -688,7 +775,9 @@ export default function App () {
       const payload = await invoke('state')
       adoptState(payload)
       setTimeout(refreshUrl, 700)
-    } catch (_) {}
+    } catch (err) {
+      dlog('selectTool failed', id, String(err))
+    }
   }, [adoptState, refreshUrl])
 
   const openMenu = useCallback((id, x, y) => {
@@ -802,19 +891,21 @@ export default function App () {
   }, [settingsOpen, reportSettings])
 
   const openSettings = useCallback(async () => {
+    dlog('openSettings() clicked, settingsOpen -> true')
     setSettingsOpen(true)
     try {
       const payload = await invoke('open_settings')
       adoptState(payload)
-    } catch (_) {}
+    } catch (_) { dlog('openSettings() swallowed an error') }
   }, [adoptState])
 
   const closeSettings = useCallback(async () => {
+    dlog('closeSettings() clicked, settingsOpen -> false')
     setSettingsOpen(false)
     try {
       const payload = await invoke('close_settings')
       adoptState(payload)
-    } catch (_) {}
+    } catch (_) { dlog('closeSettings() swallowed an error') }
   }, [adoptState])
 
   const applyZoom = useCallback((delta) => {
@@ -837,7 +928,7 @@ export default function App () {
   }, [state.always_on_top])
 
   const hideWindow = useCallback(() => {
-    window.__TAURI__.window.getCurrentWindow().hide().catch(() => {})
+    getCurrentWindow().hide().catch(() => {})
   }, [])
 
   const breakIcon = useCallback((id) => {
@@ -933,13 +1024,13 @@ export default function App () {
   // `data-tauri-drag-region` relies on Tauri's injected script, which a child
   // webview never loads, so dragging is wired explicitly on empty space only.
   const startDrag = (e) => {
+    dlog('startDrag', { button: e.button, target: e.target?.tagName, cls: String(e.target?.className || '').slice(0, 40) })
     if (e.button !== 0) return
     if (e.target.closest('button, input, a, .tool')) return
     // startDragging resolves when the drag ends, which is exactly when the
     // window can be sitting past the edge of every display. Ask the host to
     // pull it back then, instead of discovering it on the next summon.
-    window.__TAURI__.window
-      .getCurrentWindow()
+    getCurrentWindow()
       .startDragging()
       .then(() => invoke('clamp_window'))
       .catch(() => {})

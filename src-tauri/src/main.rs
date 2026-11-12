@@ -45,6 +45,8 @@ const WINDOW_RADIUS: f64 = 20.0;
 
 struct App {
     active: std::sync::Mutex<String>,
+    #[cfg(windows)]
+    tool_operation: std::sync::Mutex<()>,
     /// Last DOM report from the rail, used by the smoke gate.
     rail: std::sync::Mutex<Option<String>>,
     /// Last DOM report from the settings overlay.
@@ -797,21 +799,6 @@ mod win_env {
         );
     }
 
-    /// How many content views have been created in this process.
-    static CONTENT_VIEWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-    pub fn content_views() -> usize {
-        CONTENT_VIEWS.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn count_content_view() {
-        CONTENT_VIEWS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn has_environment() -> bool {
-        ENV.load(std::sync::atomic::Ordering::SeqCst) != 0
-    }
-
     pub fn get() -> Option<ICoreWebView2Environment> {
         let addr = ENV.load(std::sync::atomic::Ordering::SeqCst);
         if addr == 0 {
@@ -849,28 +836,6 @@ fn with_shared_environment<R: tauri::Runtime>(
     }
 }
 
-/// Blocks until a content view has published its environment, or gives up.
-///
-/// The environment is published from a background thread precisely so asking
-/// for it cannot re-enter webview creation. That makes publication arrive a
-/// moment later than the child that triggers it, so a second tool opened right
-/// away would find nothing, build its own environment over the same directory,
-/// and fail with ERROR_BUSY -- the original defect. Waiting closes that window.
-///
-/// Bounded, because no environment ever appearing means the first child failed,
-/// and then the caller should proceed and let the failure surface as it is.
-#[cfg(windows)]
-fn wait_for_environment(timeout: std::time::Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if win_env::has_environment() {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    win_env::has_environment()
-}
-
 fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let tool = tools::get(id)?;
     let label = format!("tool_{id}");
@@ -880,14 +845,21 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     let window = app.get_window("main")?;
     let url = tool.url.parse().ok()?;
     let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(url));
+    // Navigation is otherwise invisible: `url()` keeps reporting about:blank
+    // until a navigation commits, so a blocked or slow load and a view that
+    // never started look identical. These two lines separate them.
+    builder = builder.on_page_load(|webview, payload| {
+        let phase = match payload.event() {
+            tauri::webview::PageLoadEvent::Started => "start",
+            tauri::webview::PageLoadEvent::Finished => "finish",
+        };
+        eprintln!("anychat: page {phase} {} {}", webview.label(), payload.url());
+    });
+    // The preceding child publishes its environment before returning, so this
+    // never sleeps on the main thread while waiting for a callback that the
+    // same thread must run.
     #[cfg(windows)]
     {
-        // The first content view has nobody to wait for; every later one waits
-        // for the environment its predecessor publishes on a background thread.
-        if win_env::content_views() > 0 {
-            let _ = wait_for_environment(std::time::Duration::from_secs(3));
-        }
-        win_env::count_content_view();
         builder = with_shared_environment(builder);
     }
 
@@ -1030,42 +1002,52 @@ fn build_tool_webview(app: &tauri::AppHandle, id: &str) -> Option<Webview> {
     if let Some(dir) = shared_profile_dir(app) {
         builder = builder.data_directory(dir);
     }
-    let webview = window
-        .add_child(
-            builder,
-            LogicalPosition::new(rail_width(app), BAR_H),
-            LogicalSize::new(800.0, 600.0),
-        )
-        .ok()?;
+    let webview = match window.add_child(
+        builder,
+        LogicalPosition::new(rail_width(app), BAR_H),
+        LogicalSize::new(800.0, 600.0),
+    ) {
+        Ok(webview) => webview,
+        Err(e) => {
+            // Keep the platform error: WebView2's ERROR_BUSY and an uninitialised
+            // environment both surface here, and `.ok()?` used to discard the one
+            // string that tells them apart.
+            eprintln!("anychat: add_child tool_{id} failed: {e}");
+            return None;
+        }
+    };
     #[cfg(windows)]
     {
-        // Runs off the creation frame. Asking a webview that is still being
-        // created for its URL blocks: `url()` goes through the same channel as
-        // creation and is queued behind the frame that has not returned yet.
-        // Calling it inline was the whole stall -- the child existed, nothing
-        // after it ran, and the window stayed white.
+        // Publish before returning to the event loop. Delaying this to the
+        // navigation-recovery thread raced the next tool selection: its wait
+        // blocked the main thread that this publication needed, so the next
+        // child timed out and initialised a conflicting environment.
+        remember_environment(&webview);
+
+        // URL recovery stays off the creation frame. Asking a webview that is
+        // still being created for its URL blocks: `url()` goes through the same
+        // channel as creation and is queued behind the frame that has not
+        // returned yet. Calling it inline was the whole stall -- the child
+        // existed, nothing after it ran, and the window stayed white.
         let late = webview.clone();
         let owned_id = id.to_string();
         std::thread::spawn(move || {
             // Long enough for creation to finish and the browser to start.
             std::thread::sleep(std::time::Duration::from_millis(600));
-            // Publishing first: every later content view waits for it.
-            remember_environment(&late);
-            let on_blank = late
-                .url()
-                .map(|u| u.as_str() == "about:blank")
-                .unwrap_or(false);
-            if !on_blank {
-                return;
-            }
             // A controller can exist before the browser behind it, and a
             // navigation issued in that window is dropped without an error.
-            // The view is then real but empty, which is the white window.
+            // One reissue is safe; repeating it would reset a load that is
+            // merely slow, which `url()` cannot tell apart from a dropped one.
+            let now = late.url().map(|u| u.to_string()).unwrap_or_default();
+            if !now.is_empty() && now != "about:blank" {
+                eprintln!("anychat: tool_{owned_id} is on {now}");
+                return;
+            }
             let Some(tool) = tools::get(&owned_id) else { return };
             let Ok(target) = tool.url.parse() else { return };
             match late.navigate(target) {
-                Ok(()) => eprintln!("anychat: reissued navigation for tool_{owned_id}"),
-                Err(e) => eprintln!("anychat: could not reissue navigation for tool_{owned_id}: {e}"),
+                Ok(()) => eprintln!("anychat: tool_{owned_id} blank at 600ms, reissued once"),
+                Err(e) => eprintln!("anychat: tool_{owned_id} reissue failed: {e}"),
             }
         });
     }
@@ -1197,13 +1179,22 @@ fn build_splash(app: &tauri::AppHandle, monitor: Option<Monitor>) -> tauri::Resu
         .position(pos.x, pos.y)
         .inner_size(size.width, size.height)
         .decorations(false)
-        .transparent(true)
+        // A transparent window on Windows becomes a layered window, and a WebView2
+        // child view inside it paints a white sheet (and would swallow clicks,
+        // though the splash needs none). Keep it opaque with a dark backdrop so
+        // the animation sits on its intended colour rather than white.
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
         .visible(false)
-        .focused(false)
-        .build()?;
+        .focused(false);
+    #[cfg(target_os = "macos")]
+    let window = window.transparent(true);
+    #[cfg(not(target_os = "macos"))]
+    let window = window
+        .transparent(false)
+        .background_color(tauri::window::Color(0x06, 0x07, 0x0c, 0xff));
+    let window = window.build()?;
 
     #[cfg(target_os = "macos")]
     {
@@ -1223,12 +1214,21 @@ fn build_splash(app: &tauri::AppHandle, monitor: Option<Monitor>) -> tauri::Resu
     // ERROR_BUSY, which is the white screen. The splash shares nothing with
     // anyone -- no cookies, no storage, no sign-in -- so a private directory
     // costs nothing and removes the conflict.
+    // On every platform the webview must be transparent so the window's dark
+    // backdrop (or, on macOS, the desktop) shows through. Windows sets the window
+    // opaque above, but a transparent WebView2 still reveals that dark backdrop
+    // instead of its own white sheet.
     #[cfg(windows)]
     let webview_builder = WebviewBuilder::new(
         SPLASH_LABEL,
         WebviewUrl::App("splash.html".into()),
     )
-    .data_directory(splash_profile_dir());
+    .data_directory(splash_profile_dir())
+    .background_color(tauri::window::Color(0, 0, 0, 0))
+    .initialization_script(
+        r#"document.documentElement.style.background = 'transparent';
+           if (document.body) document.body.style.background = 'transparent';"#,
+    );
     #[cfg(not(windows))]
     let webview_builder = WebviewBuilder::new(SPLASH_LABEL, WebviewUrl::App("splash.html".into()))
         .background_color(tauri::window::Color(0, 0, 0, 0))
@@ -1420,6 +1420,10 @@ fn clamp_to_screens(window: &tauri::Window) {
 fn show_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_window("main") {
         if window.is_visible().unwrap_or(false) {
+            // Already on screen: still the only place a deferred content view
+            // gets built, since nothing else guarantees this runs while visible.
+            #[cfg(not(target_os = "macos"))]
+            schedule_content_resume(app);
             emit_state(app);
             return;
         }
@@ -1442,28 +1446,45 @@ fn show_window(app: &tauri::AppHandle) {
             let _ = window.show();
         }
         #[cfg(not(target_os = "macos"))]
-        resume_empty_content_views(app);
+        schedule_content_resume(app);
         emit_state(app);
     }
 }
 
-/// Re-issues navigation for content views that came up empty while hidden.
-///
-/// A WebView2 child created under a hidden parent can come back with no page:
-/// the controller exists, `url()` says about:blank, and the navigation it was
-/// built with was accepted and dropped. The first tool is created during setup,
-/// before the window is ever shown, so this is the normal path rather than an
-/// edge case -- and the visible result is a window with nothing in it.
-///
-/// Runs when the window is about to become visible, which is the first moment
-/// the browser behind the child will actually load anything.
+#[cfg(not(target_os = "macos"))]
+fn schedule_content_resume(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || resume_empty_content_views(&app));
+    }
+    #[cfg(not(windows))]
+    resume_empty_content_views(app);
+}
+
+/// Creates deferred content after the window is shown and recovers empty views.
 #[cfg(not(target_os = "macos"))]
 fn resume_empty_content_views(app: &tauri::AppHandle) {
-    let active = app.state::<App>().active.lock().unwrap().clone();
+    let state = app.state::<App>();
+    #[cfg(windows)]
+    let _operation = state.tool_operation.lock().unwrap();
+    let active = state.active.lock().unwrap().clone();
     let label = format!("tool_{active}");
     let Some(webview) = app.get_webview(&label) else {
+        // Creation was deferred while the window was hidden, and this is the
+        // first moment a content view can load at all.
+        if let Err(err) = select_tool_inner(app, active) {
+            eprintln!("anychat: could not resume {label}: {err}");
+        }
         return;
     };
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !state.settings_open.load(SeqCst) && !state.menu_open.load(SeqCst) {
+            let _ = resume_tool(app, &webview);
+        }
+    }
     let Ok(url) = webview.url() else { return };
     if url.as_str() != "about:blank" {
         return;
@@ -1472,8 +1493,29 @@ fn resume_empty_content_views(app: &tauri::AppHandle) {
     let Ok(target) = tool.url.parse() else { return };
     match webview.navigate(target) {
         Ok(()) => eprintln!("anychat: resumed empty content view {label}"),
-        Err(e) => eprintln!("anychat: could not resume {label}: {e}"),
+        Err(e) => {
+            eprintln!("anychat: could not resume {label}: {e}");
+            return;
+        }
     }
+    // `url()` reports the committed URL, which stays about:blank while a
+    // navigation is still in flight. A slow or blocked network therefore looks
+    // exactly like a view that never started, and re-issuing on every check
+    // reset the load each time -- guaranteeing it never finished. Watch only;
+    // `on_page_load` (see `build_tool_webview`) reports whether navigation
+    // actually began.
+    let watch = webview.clone();
+    std::thread::spawn(move || {
+        for attempt in 1..=8 {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            let now = watch.url().map(|u| u.to_string()).unwrap_or_default();
+            if !now.is_empty() && now != "about:blank" {
+                eprintln!("anychat: {label} committed {now} after {attempt}s");
+                return;
+            }
+        }
+        eprintln!("anychat: {label} still about:blank after 8s (navigation in flight or never started)");
+    });
 }
 
 fn toggle_window(app: &tauri::AppHandle) {
@@ -1613,7 +1655,7 @@ fn relayout_all(app: &tauri::AppHandle) {
     let active = app.state::<App>().active.lock().unwrap().clone();
     if let Some(webview) = app.get_webview(&format!("tool_{active}")) {
         if settings_open {
-            let _ = webview.hide();
+            hide_content_view(&webview);
         } else {
             let _ = resume_tool(app, &webview);
         }
@@ -1725,6 +1767,20 @@ fn resume_tool(app: &tauri::AppHandle, webview: &Webview) -> Result<(), String> 
     Ok(())
 }
 
+/// Hide the content webview and, on Windows, also move it far off-screen. A
+/// hidden WebView2 child view there keeps intercepting hit-tests for its old
+/// rectangle, so leaving it in place would swallow every click inside a
+/// rail-drawn popup (settings panel, context menu) that overlaps the content
+/// area -- the panel would look open but none of its buttons would respond.
+/// macOS WKWebView releases the hit-test on hide, so it needs no special care.
+fn hide_content_view(webview: &Webview) {
+    let _ = webview.hide();
+    #[cfg(windows)]
+    {
+        let _ = webview.set_position(LogicalPosition::new(-100000.0, -100000.0));
+    }
+}
+
 /// How long a tool webview may sit hidden before it is destroyed.
 ///
 /// A hidden WKWebView is not idle: its render tree, DOM, JS heap and decoded
@@ -1795,7 +1851,7 @@ fn menu_open(app: tauri::AppHandle) {
     let active = app.state::<App>().active.lock().unwrap().clone();
     if let Some(webview) = app.get_webview(&format!("tool_{active}")) {
         app.state::<App>().content_hidden.store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = webview.hide();
+        hide_content_view(&webview);
     }
 }
 
@@ -1970,44 +2026,90 @@ fn resident_tools(app: tauri::AppHandle) -> Vec<String> {
         .collect()
 }
 
-#[tauri::command]
+// WebView2 must be created outside the IPC callback on Windows.
+#[cfg_attr(windows, tauri::command(async))]
+#[cfg_attr(not(windows), tauri::command)]
 fn select_tool(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    #[cfg(windows)]
+    let state = app.state::<App>();
+    #[cfg(windows)]
+    let _operation = state.tool_operation.lock().unwrap();
+    select_tool_inner(&app, id)
+}
+
+fn select_tool_inner(app: &tauri::AppHandle, id: String) -> Result<(), String> {
     if tools::get(&id).is_none() {
         return Err(format!("unknown tool: {id}"));
     }
-    let previous = {
-        let state = app.state::<App>();
-        let mut active = state.active.lock().unwrap();
-        let previous = active.clone();
-        *active = id.clone();
-        previous
-    };
+    let state = app.state::<App>();
+    #[cfg(windows)]
+    let defer_creation = !app
+        .get_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    #[cfg(not(windows))]
+    let defer_creation = false;
 
+    // WebView2 can drop the initial navigation under a hidden parent.
+    let webview = if defer_creation {
+        eprintln!("anychat: select_tool {id} deferred until the window is shown");
+        None
+    } else {
+        Some(
+            build_tool_webview(app, &id)
+                .ok_or_else(|| format!("failed to create webview for {id}"))?,
+        )
+    };
+    let previous = std::mem::replace(&mut *state.active.lock().unwrap(), id.clone());
     if previous != id {
-        if let Some(webview) = app.get_webview(&format!("tool_{previous}")) {
-            let _ = webview.hide();
+        if let Some(previous_view) = app.get_webview(&format!("tool_{previous}")) {
+            let _ = previous_view.hide();
         }
     }
-
-    note_usage(&app, &id);
-    let webview = build_tool_webview(&app, &id).ok_or("failed to create webview")?;
-    // Keep the content hidden while settings are open; showing it here would
+    note_usage(app, &id);
+    let Some(webview) = webview else {
+        emit_state(app);
+        return Ok(());
+    };
+    // Keep the content hidden while settings is open; showing it here would
     // paint the native child view straight over the panel.
-    if app.state::<App>().settings_open.load(std::sync::atomic::Ordering::SeqCst) {
-        let _ = webview.hide();
+    use std::sync::atomic::Ordering::SeqCst;
+    if state.settings_open.load(SeqCst) || state.menu_open.load(SeqCst) {
+        hide_content_view(&webview);
+        state.content_hidden.store(true, SeqCst);
     } else {
-        resume_tool(&app, &webview)?;
+        resume_tool(app, &webview)?;
+        state.content_hidden.store(false, SeqCst);
+        // One line per switch: label, geometry and zoom are what decide whether
+        // the view is on screen, and none of it is visible from the rail's page.
+        let layout = load_layout(app);
+        let (w, h) = logical_window_size(app);
+        let rail = rail_width(app);
+        eprintln!(
+            "anychat: select_tool {id} -> {} rect=({rail}, {BAR_H}) {}x{} zoom={}",
+            webview.label(),
+            (w - rail).max(1.0),
+            (h - BAR_H).max(1.0),
+            layout.zoom
+        );
     }
-    emit_state(&app);
+    emit_state(app);
     Ok(())
 }
 
-#[tauri::command]
+#[cfg_attr(windows, tauri::command(async))]
+#[cfg_attr(not(windows), tauri::command)]
 fn new_chat(app: tauri::AppHandle) -> Result<(), String> {
-    let active = app.state::<App>().active.lock().unwrap().clone();
+    let state = app.state::<App>();
+    #[cfg(windows)]
+    let _operation = state.tool_operation.lock().unwrap();
+    let active = state.active.lock().unwrap().clone();
     let tool = tools::get(&active).ok_or("unknown tool")?;
     let url = tool.new_chat.parse().map_err(|e| format!("{e}"))?;
-    let webview = build_tool_webview(&app, &active).ok_or("no webview")?;
+    if app.get_webview(&format!("tool_{active}")).is_none() {
+        select_tool_inner(&app, active.clone())?;
+    }
+    let webview = app.get_webview(&format!("tool_{active}")).ok_or("no webview")?;
     webview.navigate(url).map_err(|e| e.to_string())?;
     // ⌘N also arrives from a tool page, where the rail's own handler never runs.
     // Announcing here means the acknowledgement appears however the shortcut was
@@ -2015,6 +2117,20 @@ fn new_chat(app: tauri::AppHandle) -> Result<(), String> {
     let _ = app.emit_to(RAIL_LABEL, "new-chat", ());
     emit_state(&app);
     Ok(())
+}
+
+fn schedule_new_chat(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(err) = new_chat(app) {
+                eprintln!("anychat: new chat failed: {err}");
+            }
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = new_chat(app.clone());
 }
 
 #[tauri::command]
@@ -2048,7 +2164,7 @@ fn open_settings(app: tauri::AppHandle) -> Result<StateDto, String> {
     let active = app.state::<App>().active.lock().unwrap().clone();
     if let Some(webview) = app.get_webview(&format!("tool_{active}")) {
         app.state::<App>().content_hidden.store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = webview.hide();
+        hide_content_view(&webview);
     }
     Ok(state_dto(&app))
 }
@@ -2877,8 +2993,7 @@ fn start_probe(app: tauri::AppHandle) {
                     if line.is_empty() {
                         continue;
                     }
-                    let h = handle.clone();
-                    let _ = handle.run_on_main_thread(move || run_probe_command(h, line));
+                    dispatch_probe_command(&handle, line);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(120));
             }
@@ -2893,25 +3008,35 @@ fn start_probe(app: tauri::AppHandle) {
             if cmd.is_empty() {
                 continue;
             }
-            let h = handle.clone();
-            let _ = handle.run_on_main_thread(move || {
-                println!("PROBE tick {cmd}");
-                run_probe_command(h, cmd);
-            });
+            dispatch_probe_command(&handle, cmd);
         }
         // stdin closed: keep running until told to quit.
     });
 }
 
-fn run_smoke_async(app: tauri::AppHandle) {
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+fn dispatch_probe_command(app: &tauri::AppHandle, cmd: String) {
     let handle = app.clone();
-    let finished = done.clone();
-    let _ = app.run_on_main_thread(move || {
-        run_smoke(&handle, &finished);
-    });
-    while !done.load(std::sync::atomic::Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    #[cfg(windows)]
+    run_probe_command(handle, cmd);
+    #[cfg(not(windows))]
+    let _ = app.run_on_main_thread(move || run_probe_command(handle, cmd));
+}
+
+fn run_smoke_async(app: tauri::AppHandle) {
+    #[cfg(windows)]
+    run_smoke(&app, &std::sync::atomic::AtomicBool::new(false));
+
+    #[cfg(not(windows))]
+    {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = app.clone();
+        let finished = done.clone();
+        let _ = app.run_on_main_thread(move || {
+            run_smoke(&handle, &finished);
+        });
+        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 
@@ -3289,7 +3414,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     app.on_menu_event(move |app, event| match event.id().as_ref() {
         "session.new" => {
-            let _ = new_chat(app.clone());
+            schedule_new_chat(app);
         }
         "session.reload" => {
             let _ = nav(app.clone(), "reload".to_string());
@@ -3336,7 +3461,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "toggle" => toggle_window(app),
             "new" => {
                 show_window(app);
-                let _ = new_chat(app.clone());
+                schedule_new_chat(app);
             }
             "quit" => app.exit(0),
             _ => {}
@@ -3365,6 +3490,8 @@ fn main() {
             active: std::sync::Mutex::new(
                 TOOLS.first().map(|t| t.id.to_string()).unwrap_or_default(),
             ),
+            #[cfg(windows)]
+            tool_operation: std::sync::Mutex::new(()),
             rail: std::sync::Mutex::new(None),
             settings_dom: std::sync::Mutex::new(None),
             settings_open: std::sync::atomic::AtomicBool::new(false),
@@ -3417,6 +3544,9 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            // Marks which build is running: the console diagnostics below only
+            // exist in this revision, so a missing line means a stale binary.
+            eprintln!("anychat: boot {} (select_tool diagnostics)", app.package_info().version);
 
             // Menu-bar app: drop the Dock tile and the app menu so AnyChat behaves
             // like a summonable utility rather than a document app.
@@ -3461,8 +3591,19 @@ fn main() {
                 // No native title bar at all: the system traffic lights used to
                 // float over our header. The rail header now draws its own
                 // close/pin buttons, so the window is undecorated.
-                .decorations(false)
-                .transparent(true);
+                .decorations(false);
+            // A transparent window on Windows becomes a layered window, and a
+            // WebView2 child view inside it never receives mouse clicks (only
+            // mouse-move reaches it) -- every button and drag in the rail stops
+            // responding. macOS uses WKWebView and is unaffected, so only Windows
+            // is made opaque here; the page supplies its own backdrop via
+            // `data-platform="win"` so the rounded corners still read as a card.
+            #[cfg(target_os = "macos")]
+            let window = window.transparent(true);
+            #[cfg(not(target_os = "macos"))]
+            let window = window
+                .transparent(false)
+                .background_color(tauri::window::Color(0x13, 0x13, 0x15, 0xff));
             #[cfg(target_os = "macos")]
             let window = window.hidden_title(true);
             let window = window.build()?;
@@ -3497,6 +3638,16 @@ fn main() {
                 LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(980.0, 760.0),
             )?;
+            // `tauri dev` compiles with debug_assertions, so open_devtools is
+            // available without the `devtools` Cargo feature; release builds
+            // drop this block entirely. Opt-in because an inspector window
+            // every launch would steal focus, which this app must never do.
+            #[cfg(debug_assertions)]
+            if std::env::var("ANYCHAT_DEVTOOLS").is_ok() {
+                if let Some(w) = handle.get_webview(RAIL_LABEL) {
+                    w.open_devtools();
+                }
+            }
             // Deliberately not registered as the shared environment. An
             // environment is bound to the user-data directory it was created
             // over, and the rail keeps Tauri's default while content views use
@@ -3535,16 +3686,22 @@ fn main() {
                 eprintln!("anychat: {why}");
             }
 
-            // First tool is created eagerly so the window has content the moment
-            // it is summoned, but the window itself stays hidden until asked.
-            let first = TOOLS[0].id.to_string();
-            let _ = select_tool(handle.clone(), first);
+            // Windows creates the first content view on summon, once visible.
+            #[cfg(not(windows))]
+            if let Some(first) = TOOLS.first() {
+                let _ = select_tool(handle.clone(), first.id.to_string());
+            }
 
             // Launch animation, unless this is a headless gate run: the tests
             // must not race a splash window that is about to close itself.
+            // A DevTools session skips it too, so the inspector is not hidden
+            // behind a full-screen splash for the first few seconds.
+            let devtools_session = cfg!(debug_assertions)
+                && std::env::var("ANYCHAT_DEVTOOLS").is_ok();
             let skip_splash = std::env::var("ANYCHAT_SMOKE").is_ok()
                 || std::env::var("ANYCHAT_PROBE").is_ok()
-                || std::env::var("ANYCHAT_NO_SPLASH").is_ok();
+                || std::env::var("ANYCHAT_NO_SPLASH").is_ok()
+                || devtools_session;
             if !skip_splash {
                 let monitor = handle
                     .get_window("main")
@@ -3555,7 +3712,7 @@ fn main() {
                         .state::<App>()
                         .booted
                         .store(true, std::sync::atomic::Ordering::SeqCst);
-                    if std::env::var("ANYCHAT_DEMO_SHOW").is_ok() {
+                    if devtools_session || std::env::var("ANYCHAT_DEMO_SHOW").is_ok() {
                         show_window(&handle);
                     }
                 }
@@ -3565,7 +3722,7 @@ fn main() {
                     .state::<App>()
                     .booted
                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                if std::env::var("ANYCHAT_DEMO_SHOW").is_ok() {
+                if devtools_session || std::env::var("ANYCHAT_DEMO_SHOW").is_ok() {
                     show_window(&handle);
                 }
             }
@@ -3583,12 +3740,6 @@ fn main() {
             }
             if std::env::var("ANYCHAT_SMOKE").is_ok() {
                 let handle = handle.clone();
-                // Run off the main thread: run_smoke sleeps a lot, and sleeping
-                // on the main thread starves the rail's IPC and its timers, which
-                // is exactly what used to make the settings report never arrive.
-                // run_smoke drives window APIs, which must run on the main thread,
-                // but it also sleeps. Pump the event loop between phases instead of
-                // blocking it: spawn a thread that posts one step at a time.
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(4000));
                     run_smoke_async(handle);
@@ -3617,8 +3768,11 @@ fn main() {
                 tauri::WindowEvent::Focused(false) => {
                     // Headless gate runs resize and focus the window on purpose;
                     // auto-hiding under them invalidates every geometry check.
+                    // A DevTools session is the same: the inspector takes focus,
+                    // and hiding the window behind it makes debugging impossible.
                     if std::env::var("ANYCHAT_PROBE").is_ok()
                         || std::env::var("ANYCHAT_SMOKE").is_ok()
+                        || (cfg!(debug_assertions) && std::env::var("ANYCHAT_DEVTOOLS").is_ok())
                     {
                         return;
                     }

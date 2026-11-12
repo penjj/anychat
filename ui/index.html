@@ -15,6 +15,15 @@
     } catch (e) {
       document.documentElement.setAttribute('data-theme', 'auto')
     }
+    // Tag the platform so the stylesheet can paint an opaque backdrop on Windows.
+    // The host window there is not translucent (a transparent layered window on
+    // Windows swallows WebView2 clicks), so the page must provide its own
+    // background instead of letting the desktop show through.
+    try {
+      if (/Windows/i.test(navigator.userAgent || '')) {
+        document.documentElement.setAttribute('data-platform', 'win')
+      }
+    } catch (e) {}
   </script>
 </head>
 <body>
