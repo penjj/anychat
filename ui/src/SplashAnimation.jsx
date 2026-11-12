@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 
 /**
  * Launch animation: a field of drifting light gathers itself into the wordmark.
@@ -106,7 +107,7 @@ export default function SplashAnimation () {
       if (sentRef.current) return
       sentRef.current = true
       try {
-        window.__TAURI__.core.invoke('splash_done')
+        invoke('splash_done').catch(() => {})
       } catch (_) {}
     }
     const finish = setTimeout(done, TOTAL)
@@ -158,8 +159,8 @@ export default function SplashAnimation () {
       canvas.style.height = window.innerHeight + 'px'
 
       const { points, step, size } = measureWord(width, height)
-      // Reported on the first frame, not here: `__TAURI__` is injected by the
-      // IPC bootstrap and is not guaranteed to exist while the effect body runs.
+      // Reported on the first frame, not here: the IPC bootstrap is not
+      // guaranteed to exist while the effect body runs.
       stats = { points: points.length / 2, step, size }
 
       const reach = Math.hypot(width, height) / 2
@@ -227,7 +228,7 @@ export default function SplashAnimation () {
         const s0 = stats
         stats = null
         try {
-          window.__TAURI__.core.invoke('splash_stats', s0)
+          invoke('splash_stats', s0).catch(() => {})
         } catch (_) {}
       }
       const elapsed = now - started
